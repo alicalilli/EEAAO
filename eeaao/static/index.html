@@ -1,0 +1,98 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Everything Everywhere All at Once</title>
+<link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+<header class="top">
+  <div>
+    <h1>Everything Everywhere All at Once</h1>
+    <p class="sub">Bug bounty workspace · local only</p>
+  </div>
+  <div class="buttons">
+    <button id="settings-btn">Settings</button>
+    <button id="add" class="primary">Add program</button>
+  </div>
+</header>
+
+<main>
+  <section id="list" aria-label="Programs"></section>
+  <section id="detail" aria-live="polite"></section>
+</main>
+
+<dialog id="form-dialog">
+  <form id="form" method="dialog" novalidate>
+    <h2 id="form-title">Add program</h2>
+    <label>Name
+      <input name="name" required maxlength="120" autocomplete="off">
+    </label>
+    <label>Program link
+      <input name="url" type="url" placeholder="https://hackerone.com/…" autocomplete="off">
+    </label>
+    <div class="two">
+      <label>In scope <span class="hint">one per line</span>
+        <textarea name="in_scope" rows="8" spellcheck="false"
+          placeholder="*.example.com&#10;example.com&#10;https://shop.example.org/api/"></textarea>
+      </label>
+      <label>Out of scope <span class="hint">always wins</span>
+        <textarea name="out_of_scope" rows="8" spellcheck="false"
+          placeholder="admin.example.com&#10;example.com/blog"></textarea>
+      </label>
+    </div>
+    <div id="scope-feedback" class="feedback"></div>
+    <div class="two">
+      <label>Rate limit <span class="hint">requests per second</span>
+        <input name="rate_limit" type="number" min="0.1" max="1000" step="0.1" value="5">
+      </label>
+      <label>Required headers <span class="hint">Name: value, one per line</span>
+        <textarea name="headers" rows="2" spellcheck="false"
+          placeholder="X-Bug-Bounty: my-username"></textarea>
+      </label>
+    </div>
+    <label class="check">
+      <input name="automation_allowed" type="checkbox">
+      <span>This program allows automated scanning
+        <span class="hint">Leave off if the policy forbids it or you are unsure. When off, no tool will ever run against this program.</span>
+      </span>
+    </label>
+    <label>Notes
+      <textarea name="notes" rows="2"></textarea>
+    </label>
+    <details id="exclusions" class="exclusions">
+      <summary>Out-of-scope bug types <span class="hint" id="exclusion-count"></span></summary>
+      <p class="hint">Results of ticked types are still recorded but marked "Excluded" and hidden by default.</p>
+      <div id="exclusion-list"></div>
+    </details>
+    <div id="form-error" class="error" role="alert"></div>
+    <div class="actions">
+      <button type="button" id="cancel">Cancel</button>
+      <button type="submit" class="primary">Save program</button>
+    </div>
+  </form>
+</dialog>
+
+<dialog id="settings-dialog">
+  <form id="settings-form" method="dialog" novalidate>
+    <h2>Settings</h2>
+    <label>GitHub token <span class="hint">used only by the GitHub bot for code search</span>
+      <input name="token" type="password" autocomplete="off" placeholder="ghp_… or github_pat_…">
+    </label>
+    <p class="hint" id="token-state"></p>
+    <p class="hint">A fine-grained token with no repository access is enough for public code search.
+      It is stored in data/eeaao.db on this computer and never shown again. You can also set the
+      GITHUB_TOKEN environment variable instead.</p>
+    <div id="settings-error" class="error" role="alert"></div>
+    <div class="actions">
+      <button type="button" id="token-clear" class="danger">Remove token</button>
+      <button type="button" id="settings-close">Close</button>
+      <button type="submit" class="primary">Save token</button>
+    </div>
+  </form>
+</dialog>
+
+<script src="/static/app.js"></script>
+</body>
+</html>

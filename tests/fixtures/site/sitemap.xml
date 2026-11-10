@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">
+<url><loc>http://127.0.0.1:8799/docs/index.html</loc></url>
+<url><loc>http://127.0.0.1:8799/products.html</loc></url>
+<url><loc>https://evil.example/not-in-scope</loc></url>
+</urlset>

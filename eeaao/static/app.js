@@ -1,0 +1,745 @@
+"use strict";
+// All text reaches the page through textContent (never innerHTML), so scope
+// entries, notes and anything a bot brings back from a target can never run
+// as markup in this app.
+
+const $ = (selector, root = document) => root.querySelector(selector);
+
+function h(tag, props = {}, ...children) {
+  const node = document.createElement(tag);
+  for (const [key, value] of Object.entries(props)) {
+    if (key === "class") node.className = value;
+    else if (key.startsWith("on")) node.addEventListener(key.slice(2), value);
+    else if (key === "checked" || key === "disabled" || key === "open") node[key] = !!value;
+    else if (key === "value") node.value = value;
+    else if (value !== false && value != null) node.setAttribute(key, value);
+  }
+  for (const child of children.flat()) {
+    if (child != null && child !== false) node.append(child);
+  }
+  return node;
+}
+
+// replaceChildren that skips false/null, so `cond && h(...)` can be passed.
+function fill(node, ...children) {
+  node.replaceChildren(...children.flat().filter((c) => c != null && c !== false && c !== ""));
+}
+
+async function api(method, path, body) {
+  const response = await fetch(path, {
+    method,
+    headers: body ? { "Content-Type": "application/json" } : {},
+    body: body ? JSON.stringify(body) : undefined,
+  });
+  if (response.status === 204) return null;
+  const data = await response.json().catch(() => null);
+  if (!response.ok) {
+    const error = new Error("Request failed");
+    error.detail = data && data.detail;
+    throw error;
+  }
+  return data;
+}
+
+function when(iso) {
+  if (!iso) return "";
+  const d = new Date(iso);
+  return d.toLocaleString(undefined, { dateStyle: "short", timeStyle: "medium" });
+}
+
+const state = {
+  programs: [], selectedId: null, editingId: null, catalog: [], tab: "overview",
+  poll: null, showExcluded: false, showDismissed: false,
+  inventory: { kind: "", q: "", offset: 0 }, log: { offset: 0 },
+};
+
+const TABS = [
+  ["overview", "Scope"], ["bots", "Bots"], ["findings", "Findings"],
+  ["leads", "Leads"], ["inventory", "Inventory"], ["log", "Request log"],
+];
+
+// ---------- program list ----------
+
+function automationBadge(program) {
+  return program.automation_allowed
+    ? h("span", { class: "badge ok" }, "Automation allowed")
+    : h("span", { class: "badge warn" }, "Manual only");
+}
+
+function renderList() {
+  const list = $("#list");
+  list.replaceChildren();
+  if (!state.programs.length) {
+    list.append(h("div", { class: "empty" },
+      "No programs yet. Add one to set up its scope."));
+    return;
+  }
+  for (const program of state.programs) {
+    list.append(h("button", {
+      class: "card",
+      "aria-current": program.id === state.selectedId ? "true" : null,
+      onclick: () => select(program.id),
+    },
+      h("span", { class: "name" }, program.name),
+      h("span", { class: "meta" },
+        `${program.in_rules.length} in scope · ${program.out_rules.length} out of scope · ${program.rate_limit} req/s`),
+      automationBadge(program)));
+  }
+}
+
+// ---------- program detail ----------
+
+function chips(rules, emptyText) {
+  if (!rules.length) return h("p", { class: "muted" }, emptyText);
+  return h("ul", { class: "chips mono" }, rules.map((rule) => h("li", {}, rule)));
+}
+
+function currentProgram() {
+  return state.programs.find((p) => p.id === state.selectedId);
+}
+
+function renderDetail() {
+  stopPolling();
+  const detail = $("#detail");
+  const program = currentProgram();
+  if (!program) {
+    detail.replaceChildren(h("div", { class: "empty" },
+      state.programs.length ? "Select a program to see its scope." : ""));
+    return;
+  }
+  const headerNames = Object.keys(program.headers);
+  const body = h("div", { class: "tab-body" });
+  const tabs = h("div", { class: "tabs", role: "tablist" }, TABS.map(([id, label]) =>
+    h("button", {
+      role: "tab", "aria-selected": state.tab === id ? "true" : "false",
+      onclick: () => { state.tab = id; renderDetail(); },
+    }, label)));
+
+  detail.replaceChildren(h("div", { class: "panel" },
+    h("div", { class: "panel-head" },
+      h("h2", {}, program.name),
+      h("div", { class: "buttons" },
+        h("button", { onclick: () => openForm(program) }, "Edit"),
+        h("button", { class: "danger", onclick: () => remove(program) }, "Delete"))),
+    h("div", { class: "facts" },
+      automationBadge(program),
+      h("span", {}, `${program.rate_limit} requests/second`),
+      h("span", {}, headerNames.length
+        ? `Sends header: ${headerNames.join(", ")}` : "No required headers"),
+      program.excluded_types.length > 0 &&
+        h("span", {}, `${program.excluded_types.length} excluded bug types`),
+      program.url && h("a", { href: program.url, target: "_blank", rel: "noopener noreferrer" },
+        "Open program page")),
+    program.scope_errors.length > 0 && h("p", { class: "error" },
+      "Some scope entries cannot be read, so nothing is allowed. Edit the program to fix them."),
+    tabs, body));
+
+  const render = {
+    overview: renderOverview, bots: renderBots, findings: (p, b) => renderFindings(p, b, "finding"),
+    leads: (p, b) => renderFindings(p, b, "lead"), inventory: renderInventory, log: renderLog,
+  }[state.tab];
+  render(program, body);
+}
+
+function renderOverview(program, body) {
+  const input = h("textarea", {
+    rows: 4, spellcheck: "false", "aria-label": "Targets to check",
+    placeholder: "Paste hosts or URLs, one per line",
+  });
+  const results = h("ul", { class: "results" });
+  const summary = h("span", { class: "muted" });
+
+  async function runCheck() {
+    const targets = input.value.split(/\r?\n/).filter((line) => line.trim());
+    if (!targets.length) return;
+    try {
+      const data = await api("POST", `/api/programs/${program.id}/scope-check`, { targets });
+      const allowed = data.results.filter((r) => r.allowed).length;
+      summary.textContent = `${allowed} in scope, ${data.results.length - allowed} refused`;
+      results.replaceChildren(...data.results.map((r) => {
+        let label = "Refused", tone = "no";
+        if (r.allowed && r.automated) { label = "In scope"; tone = "ok"; }
+        else if (r.allowed) { label = "In scope · manual only"; tone = "warn"; }
+        return h("li", {},
+          h("span", { class: `badge ${tone}` }, label),
+          h("span", { class: "target mono" }, r.target),
+          h("span", { class: "why" }, r.reason + (r.rule ? ` Rule: ${r.rule}` : "")));
+      }));
+    } catch (error) {
+      summary.textContent = "Check failed.";
+    }
+  }
+
+  fill(body, 
+    h("div", { class: "scope-cols" },
+      h("div", {}, h("h3", {}, "In scope"), chips(program.in_rules, "Nothing in scope.")),
+      h("div", {}, h("h3", {}, "Out of scope"), chips(program.out_rules, "No exclusions."))),
+    program.notes && h("div", {}, h("h3", {}, "Notes"), h("p", { class: "notes" }, program.notes)),
+    h("h3", {}, "Scope check"),
+    h("div", { class: "checker" },
+      input,
+      h("div", { class: "row" },
+        h("button", { class: "primary", onclick: runCheck }, "Check targets"), summary),
+      results));
+}
+
+// ---------- bots tab ----------
+
+const RECON_OPTIONS = [
+  ["crawl_pages_per_host", "Crawler: pages per host", 40],
+  ["crawl_max_pages", "Crawler: pages in total", 300],
+  ["crawl_depth", "Crawler: link depth", 3],
+  ["crawl_max_js", "Crawler: JavaScript files", 150],
+  ["archive_limit", "Archive: URLs per domain", 50000],
+  ["github_max_queries", "GitHub: searches per run", 10],
+];
+
+function stopPolling() {
+  if (state.poll) clearTimeout(state.poll);
+  state.poll = null;
+}
+
+async function renderBots(program, body) {
+  const runsBox = h("div", { class: "runs" });
+  const live = h("div", { class: "live" });
+  const departments = h("div", { class: "departments" });
+  fill(body, 
+    !program.automation_allowed && h("p", { class: "error" },
+      "Automated scanning is off for this program, so no bot can run. Turn it on in Edit only if the program policy allows automated tools."),
+    live, departments, h("h3", {}, "Recent runs"), runsBox);
+
+  let runs;
+  try {
+    runs = await api("GET", `/api/programs/${program.id}/runs`);
+  } catch (error) {
+    runsBox.textContent = "Could not load runs.";
+    return;
+  }
+  const busy = runs.active != null;
+
+  for (const dept of state.catalog) {
+    const boxes = [];
+    const optionInputs = {};
+    const list = h("ul", { class: "bots" }, dept.bots.map((bot) => {
+      const box = h("input", { type: "checkbox", checked: bot.built, disabled: !bot.built,
+                               "data-bot": bot.id });
+      if (bot.built) boxes.push(box);
+      return h("li", {},
+        h("label", { class: "check" }, box,
+          h("span", {}, h("strong", {}, bot.name), " ",
+            !bot.built && h("span", { class: "badge" }, "Planned"),
+            h("span", { class: "hint" }, bot.does))));
+    }));
+    const error = h("div", { class: "error", role: "alert" });
+    let extra = null;
+    if (dept.id === "recon") {
+      extra = h("details", { class: "options" }, h("summary", {}, "Limits"),
+        h("div", { class: "option-grid" }, RECON_OPTIONS.map(([key, label, value]) => {
+          const input = h("input", { type: "number", min: "0", value: String(value) });
+          optionInputs[key] = input;
+          return h("label", {}, label, input);
+        }), (() => {
+          const box = h("input", { type: "checkbox", checked: true });
+          optionInputs.crawl_respect_robots = box;
+          return h("label", { class: "check" }, box, h("span", {}, "Crawler follows robots.txt"));
+        })()));
+    }
+    if (dept.id === "content") {
+      const osv = h("input", { type: "checkbox", checked: true });
+      const maps = h("input", { type: "number", min: "0", value: "50" });
+      optionInputs.library_osv = osv;
+      optionInputs.sourcemap_max = maps;
+      extra = h("details", { class: "options" }, h("summary", {}, "Options"),
+        h("div", { class: "option-grid" },
+          h("label", {}, "Source maps to fetch at most", maps),
+          h("label", { class: "check" }, osv, h("span", {}, "Look up library versions in OSV.dev",
+            h("span", { class: "hint" }, "Sends library names and versions (not your target) to api.osv.dev.")))));
+    }
+    if (dept.id === "thirdparty") {
+      const max = h("input", { type: "number", min: "0", value: "200" });
+      optionInputs.thirdparty_max_domains = max;
+      extra = h("details", { class: "options" }, h("summary", {}, "Options"),
+        h("div", { class: "option-grid" }, h("label", {}, "Linked domains to look up at most", max)));
+    }
+    if (dept.id === "tls") {
+      const box = h("input", { type: "checkbox", checked: true });
+      optionInputs.tls_legacy_probe = box;
+      extra = h("details", { class: "options" }, h("summary", {}, "Options"),
+        h("label", { class: "check" }, box, h("span", {},
+          "Check whether TLS 1.0 and 1.1 are still accepted",
+          h("span", { class: "hint" },
+            "Two extra standard handshakes per HTTPS endpoint, like an old browser connecting."))));
+    }
+    const start = async () => {
+      const bots = boxes.filter((b) => b.checked).map((b) => b.dataset.bot);
+      const options = {};
+      for (const [key, input] of Object.entries(optionInputs)) {
+        options[key] = input.type === "checkbox" ? input.checked : Number(input.value);
+      }
+      try {
+        await api("POST", `/api/programs/${program.id}/runs`,
+                  { department: dept.id, bots, options });
+        renderDetail();
+      } catch (e) {
+        error.textContent = typeof e.detail === "string" ? e.detail : "Could not start the run.";
+      }
+    };
+    departments.append(h("section", { class: "dept" },
+      h("div", { class: "dept-head" },
+        h("div", {}, h("h4", {}, dept.name), h("p", { class: "hint" }, dept.summary)),
+        dept.runnable
+          ? h("button", { class: "primary", onclick: start,
+                          disabled: busy || !program.automation_allowed }, `Run ${dept.name}`)
+          : h("span", { class: "badge" }, "Coming next")),
+      list, extra, error));
+  }
+
+  runsBox.replaceChildren(runs.runs.length ? h("ul", { class: "run-list" }, runs.runs.map((run) =>
+    h("li", {},
+      h("span", { class: `badge ${run.status === "done" ? "ok" : run.status === "running" ? "warn" : "no"}` },
+        run.status),
+      h("span", {}, `${run.department} · ${run.bots.length} bots`),
+      h("span", { class: "muted" }, when(run.started_at)),
+      h("button", { onclick: () => showRun(program, run.id, live, false) }, "Show log"))))
+    : h("p", { class: "muted" }, "No runs yet."));
+
+  if (busy) showRun(program, runs.active, live, true);
+}
+
+async function showRun(program, runId, box, follow) {
+  stopPolling();
+  const events = h("ol", { class: "events mono" });
+  const status = h("span", { class: "badge warn" }, "…");
+  const stop = h("button", { class: "danger", onclick: async () => {
+    await api("POST", `/api/runs/${runId}/stop`); } }, "Stop run");
+  box.replaceChildren(h("div", { class: "run-panel" },
+    h("div", { class: "row" }, h("strong", {}, `Run #${runId}`), status, stop), events));
+  let after = 0;
+  const tick = async () => {
+    let run;
+    try {
+      run = await api("GET", `/api/runs/${runId}?after=${after}`);
+    } catch (e) {
+      return;
+    }
+    for (const event of run.events) {
+      after = event.id;
+      events.append(h("li", { class: `ev ${event.level}` },
+        h("span", { class: "muted" }, new Date(event.at).toLocaleTimeString()), " ",
+        event.bot && h("strong", {}, event.bot), " ", event.message));
+    }
+    events.scrollTop = events.scrollHeight;
+    status.textContent = run.status;
+    status.className = `badge ${run.status === "done" ? "ok" : run.status === "running" ? "warn" : "no"}`;
+    stop.hidden = run.status !== "running";
+    if (run.status === "running" && state.tab === "bots" && currentProgram()?.id === program.id) {
+      state.poll = setTimeout(tick, 1500);
+    } else if (follow && run.status !== "running") {
+      follow = false;
+      if (state.tab === "bots") setTimeout(renderDetail, 800);
+    }
+  };
+  tick();
+}
+
+// ---------- findings and leads ----------
+
+const SEV_TONE = { high: "no", medium: "warn", low: "", info: "" };
+
+function evidenceList(evidence) {
+  const show = (value) => typeof value === "string" ? value
+    : Array.isArray(value) ? value.map(show).join("\n")
+    : value && typeof value === "object"
+      ? Object.entries(value).map(([k, v]) => `${k}: ${show(v)}`).join("\n")
+      : String(value);
+  const entries = Object.entries(evidence || {}).filter(([, v]) => v != null && v !== "");
+  if (!entries.length) return null;
+  return h("dl", { class: "evidence" }, entries.flatMap(([key, value]) => [
+    h("dt", {}, key.replace(/_/g, " ")),
+    h("dd", { class: "mono" }, show(value)),
+  ]));
+}
+
+async function renderFindings(program, body, kind) {
+  let items;
+  try {
+    items = await api("GET", `/api/programs/${program.id}/findings?kind=${kind}`);
+  } catch (e) {
+    fill(body, h("p", { class: "error" }, "Could not load."));
+    return;
+  }
+  const excludedCount = items.filter((i) => i.excluded).length;
+  const dismissedCount = items.filter((i) => i.status === "dismissed").length;
+  const visible = items.filter((i) => (state.showExcluded || !i.excluded) &&
+                                      (state.showDismissed || i.status !== "dismissed"));
+  const toggles = h("div", { class: "row" },
+    h("label", { class: "check inline" }, h("input", { type: "checkbox", checked: state.showExcluded,
+      onchange: (e) => { state.showExcluded = e.target.checked; renderDetail(); } }),
+      h("span", {}, `Show excluded (${excludedCount})`)),
+    h("label", { class: "check inline" }, h("input", { type: "checkbox", checked: state.showDismissed,
+      onchange: (e) => { state.showDismissed = e.target.checked; renderDetail(); } }),
+      h("span", {}, `Show dismissed (${dismissedCount})`)));
+
+  const intro = kind === "lead"
+    ? "Leads are candidates for your own manual work. Nothing here was tested."
+    : "Findings come from passive observation and are unverified until you confirm them.";
+  const setStatus = async (item, status) => {
+    await api("PATCH", `/api/findings/${item.id}`, { status });
+    renderDetail();
+  };
+  fill(body, h("p", { class: "muted" }, intro), toggles,
+    visible.length ? h("div", { class: "cards" }, visible.map((item) =>
+      h("article", { class: `finding ${item.excluded || item.status === "dismissed" ? "dim" : ""}` },
+        h("div", { class: "row" },
+          h("span", { class: `badge ${SEV_TONE[item.severity] || ""}` }, item.severity),
+          h("span", { class: "badge" }, item.type_label),
+          item.excluded && h("span", { class: "badge no" }, "Excluded by program"),
+          item.status !== "new" && h("span", { class: "badge ok" }, item.status)),
+        h("h4", {}, item.title),
+        h("p", { class: "mono target" }, item.target),
+        item.detail && h("p", {}, item.detail),
+        evidenceList(item.evidence),
+        h("div", { class: "row foot" },
+          h("span", { class: "muted" },
+            `${item.department} / ${item.bot} · seen ${item.hits}× · first ${when(item.first_seen)} · last ${when(item.last_seen)}`),
+          h("span", { class: "buttons" },
+            item.status !== "reviewed" && h("button", { onclick: () => setStatus(item, "reviewed") }, "Mark reviewed"),
+            item.status !== "dismissed" && h("button", { onclick: () => setStatus(item, "dismissed") }, "Dismiss"),
+            item.status !== "new" && h("button", { onclick: () => setStatus(item, "new") }, "Reset"))))))
+    : h("p", { class: "empty" }, kind === "lead" ? "No leads to show." : "No findings to show."));
+}
+
+// ---------- inventory ----------
+
+const KIND_LABELS = {
+  host: "Hosts", dns: "DNS records", site: "Live sites", url: "URLs", param: "Parameters",
+  form: "Forms", js: "JavaScript", publicfile: "Public files", external: "External links",
+  bucket: "Buckets", github: "GitHub results", cookie: "Cookies", tls: "TLS endpoints", endpoint: "JS endpoints",
+  library: "Libraries", sourcemap: "Source maps", email: "Mail domains",
+  linkdomain: "Linked domains", social: "Social links",
+};
+
+function summarize(kind, data) {
+  const parts = [];
+  if (data.sources) parts.push("from " + Object.keys(data.sources).join(", "));
+  if (kind === "host") {
+    if (data.resolves === false) parts.push("does not resolve");
+    if (data.ips && data.ips.length) parts.push(data.ips.join(" "));
+    if (data.cname && data.cname.length) parts.push("CNAME " + data.cname.join(" → "));
+    if (data.live === true) parts.push("live");
+    if (data.tech) parts.push(Object.keys(data.tech).join(", "));
+  } else if (kind === "dns") {
+    for (const [type, values] of Object.entries(data.records || {})) {
+      if (values.length) parts.push(`${type}: ${values.join(" | ")}`);
+    }
+    if (data.status && data.status !== "NOERROR") parts.push(data.status);
+  } else if (kind === "site") {
+    parts.push(String(data.status));
+    if (data.title) parts.push(`"${data.title}"`);
+    if (data.final_url) parts.push("→ " + data.final_url);
+    if (data.tech && data.tech.length) parts.push(data.tech.join(", "));
+    if (data.blocked_redirect) parts.push("redirect out of scope not followed: " + data.blocked_redirect);
+  } else if (kind === "tls") {
+    if (data.error) parts.push("no handshake: " + data.error);
+    if (data.negotiated || data.version) parts.push(data.negotiated || `${data.version} ${data.cipher}`);
+    if (data.verified != null) parts.push(data.verified ? "trusted" : "NOT trusted: " + (data.verify_error || ""));
+    if (data.subject) parts.push("cert " + data.subject);
+    if (data.issuer) parts.push("by " + data.issuer);
+    if (data.not_after) parts.push("until " + data.not_after);
+    if (data.old_versions_accepted) parts.push("accepts " + data.old_versions_accepted.join(", "));
+  } else if (kind === "library") {
+    if (data.known_vulnerabilities != null) parts.push(`${data.known_vulnerabilities} known vulnerabilities`);
+    if (data.where) parts.push("in " + Object.keys(data.where).join(", "));
+  } else if (kind === "email") {
+    parts.push("SPF: " + (data.spf ? data.spf.join(" | ") : "none"));
+    parts.push("DMARC: " + (data.dmarc ? data.dmarc.join(" | ") : "none"));
+  } else if (kind === "endpoint") {
+    if (data.from) parts.push("from " + Object.keys(data.from).slice(0, 3).join(", "));
+  } else if (kind === "sourcemap") {
+    parts.push(`status ${data.status ?? "no answer"}`);
+    if (data.sources != null) parts.push(`${data.sources} files` + (data.has_source_code ? ", with source code" : ""));
+    if (data.referenced_by) parts.push("named by " + data.referenced_by);
+  } else if (kind === "linkdomain") {
+    parts.push(data.state || data.registry);
+    if (data.state) parts.push("registry " + data.registry);
+    parts.push(`${data.links} link${data.links === 1 ? "" : "s"}`);
+  } else if (kind === "social") {
+    parts.push(`${data.platform} ${data.handle}: ${data.status}`);
+    if (data.pages) parts.push("on " + data.pages.join(", "));
+  } else if (kind === "form") {
+    parts.push("fields: " + Object.keys(data.inputs || {}).join(", "));
+    if (data.found_on) parts.push("on " + data.found_on);
+  } else {
+    if (data.set_cookie) parts.push(data.set_cookie + (data.session_like ? " · session-like" : ""));
+    for (const key of ["status", "kind", "title", "repo", "path", "provider", "entries", "paths", "bytes"]) {
+      if (data[key] != null && data[key] !== "") parts.push(`${key}: ${data[key]}`);
+    }
+    if (data.archived) parts.push(`archived ${data.archived.timestamp} (${data.archived.status})`);
+    if (data.fields) parts.push(Object.entries(data.fields).map(([k, v]) => `${k}: ${v.join(", ")}`).join(" · "));
+  }
+  return parts.join(" · ");
+}
+
+async function renderInventory(program, body) {
+  const inv = state.inventory;
+  const params = new URLSearchParams({ kind: inv.kind, q: inv.q, limit: 100, offset: inv.offset });
+  let data;
+  try {
+    data = await api("GET", `/api/programs/${program.id}/assets?${params}`);
+  } catch (e) {
+    fill(body, h("p", { class: "error" }, "Could not load."));
+    return;
+  }
+  const kinds = Object.keys(KIND_LABELS).filter((k) => data.counts[k]);
+  const search = h("input", { type: "search", placeholder: "Filter by text", value: inv.q });
+  let timer;
+  search.addEventListener("input", () => {
+    clearTimeout(timer);
+    timer = setTimeout(() => { inv.q = search.value; inv.offset = 0; renderDetail(); }, 350);
+  });
+  const pick = (kind) => { inv.kind = kind; inv.offset = 0; renderDetail(); };
+  fill(body, 
+    h("div", { class: "kind-bar" },
+      h("button", { "aria-pressed": inv.kind === "" ? "true" : "false", onclick: () => pick("") },
+        `All (${Object.values(data.counts).reduce((a, b) => a + b, 0)})`),
+      kinds.map((k) => h("button", { "aria-pressed": inv.kind === k ? "true" : "false",
+                                     onclick: () => pick(k) }, `${KIND_LABELS[k]} (${data.counts[k]})`))),
+    search,
+    data.items.length ? h("ul", { class: "assets" }, data.items.map((a) => h("li", {},
+      h("span", { class: "badge" }, KIND_LABELS[a.kind] || a.kind),
+      h("span", { class: "mono value" }, a.value),
+      h("span", { class: "why" }, summarize(a.kind, a.data)))))
+      : h("p", { class: "empty" }, "Nothing in the inventory yet. Run the Recon department."),
+    pager(data.total, inv.offset, 100, (offset) => { inv.offset = offset; renderDetail(); }));
+}
+
+function pager(total, offset, size, go) {
+  if (total <= size) return null;
+  return h("div", { class: "row pager" },
+    h("button", { disabled: offset === 0, onclick: () => go(Math.max(0, offset - size)) }, "Previous"),
+    h("span", { class: "muted" }, `${offset + 1}–${Math.min(total, offset + size)} of ${total}`),
+    h("button", { disabled: offset + size >= total, onclick: () => go(offset + size) }, "Next"));
+}
+
+// ---------- request log ----------
+
+async function renderLog(program, body) {
+  let data;
+  try {
+    data = await api("GET", `/api/programs/${program.id}/requests?limit=100&offset=${state.log.offset}`);
+  } catch (e) {
+    fill(body, h("p", { class: "error" }, "Could not load."));
+    return;
+  }
+  fill(body, 
+    h("p", { class: "muted" }, "Every request bots made: to targets, to passive sources, and DNS lookups."),
+    h("div", { class: "table-wrap" }, h("table", { class: "log mono" },
+      h("thead", {}, h("tr", {}, ["Time", "Bot", "Kind", "Method", "URL / name", "Status", "ms", "Bytes", "Note"]
+        .map((t) => h("th", {}, t)))),
+      h("tbody", {}, data.items.map((r) => h("tr", { class: r.error ? "err" : "" },
+        h("td", {}, new Date(r.at).toLocaleTimeString()), h("td", {}, r.bot), h("td", {}, r.kind),
+        h("td", {}, r.method), h("td", { class: "url" }, r.url), h("td", {}, r.status ?? ""),
+        h("td", {}, r.duration_ms ?? ""), h("td", {}, r.bytes ?? ""), h("td", {}, r.error || "")))))),
+    pager(data.total, state.log.offset, 100, (offset) => { state.log.offset = offset; renderDetail(); }));
+}
+
+// ---------- selection and loading ----------
+
+function select(id) {
+  if (state.selectedId !== id) {
+    state.inventory = { kind: "", q: "", offset: 0 };
+    state.log = { offset: 0 };
+  }
+  state.selectedId = id;
+  renderList();
+  renderDetail();
+}
+
+async function load() {
+  state.programs = await api("GET", "/api/programs");
+  if (!state.programs.some((p) => p.id === state.selectedId)) {
+    state.selectedId = state.programs.length ? state.programs[0].id : null;
+  }
+  renderList();
+  renderDetail();
+}
+
+async function remove(program) {
+  if (!confirm(`Delete "${program.name}", its scope and everything the bots collected? This cannot be undone.`)) return;
+  await api("DELETE", `/api/programs/${program.id}`);
+  await load();
+}
+
+// ---------- add / edit form ----------
+
+const dialog = $("#form-dialog");
+const form = $("#form");
+
+function headersToText(headers) {
+  return Object.entries(headers).map(([name, value]) => `${name}: ${value}`).join("\n");
+}
+
+function textToHeaders(text) {
+  const headers = {};
+  for (const line of text.split(/\r?\n/)) {
+    if (!line.trim()) continue;
+    const colon = line.indexOf(":");
+    if (colon < 1) throw new Error(`Header line needs "Name: value": ${line.trim()}`);
+    headers[line.slice(0, colon).trim()] = line.slice(colon + 1).trim();
+  }
+  return headers;
+}
+
+function showErrors(box, message, items = []) {
+  box.replaceChildren();
+  if (message) box.append(message);
+  if (items.length) box.append(h("ul", {}, items.map((item) => h("li", {}, item))));
+}
+
+function describeScopeErrors(errors) {
+  return errors.map((e) =>
+    `${e.list === "in_scope" ? "In scope" : "Out of scope"}: "${e.entry}" - ${e.error}`);
+}
+
+let validateTimer;
+function validateScopeSoon() {
+  clearTimeout(validateTimer);
+  validateTimer = setTimeout(async () => {
+    const box = $("#scope-feedback");
+    try {
+      const data = await api("POST", "/api/scope/validate", {
+        in_scope: form.in_scope.value, out_of_scope: form.out_of_scope.value,
+      });
+      box.replaceChildren(
+        `${data.in_rules.length} in-scope and ${data.out_rules.length} out-of-scope entries understood.`);
+      if (data.scope_errors.length) {
+        box.append(h("ul", { class: "bad" },
+          describeScopeErrors(data.scope_errors).map((text) => h("li", {}, text))));
+      }
+    } catch (error) {
+      box.replaceChildren();
+    }
+  }, 300);
+}
+
+function renderExclusions(selected) {
+  const chosen = new Set(selected);
+  const count = () => {
+    const n = form.querySelectorAll("input[data-type]:checked").length;
+    $("#exclusion-count").textContent = n ? `${n} excluded` : "none excluded";
+  };
+  $("#exclusion-list").replaceChildren(...state.catalog
+    .filter((dept) => dept.bots.some((b) => b.types.length))
+    .map((dept) => h("fieldset", {}, h("legend", {}, dept.name),
+      dept.bots.flatMap((bot) => bot.types).map((type) => h("label", { class: "check inline" },
+        h("input", { type: "checkbox", "data-type": type.id, checked: chosen.has(type.id),
+                     onchange: count }),
+        h("span", {}, type.label, " ", h("span", { class: "hint inline-hint" },
+          type.kind === "lead" ? "lead" : "")))))));
+  count();
+}
+
+function openForm(program) {
+  state.editingId = program ? program.id : null;
+  $("#form-title").textContent = program ? "Edit program" : "Add program";
+  form.reset();
+  showErrors($("#form-error"), "");
+  if (program) {
+    form.name.value = program.name;
+    form.url.value = program.url;
+    form.in_scope.value = program.in_scope;
+    form.out_of_scope.value = program.out_of_scope;
+    form.rate_limit.value = program.rate_limit;
+    form.headers.value = headersToText(program.headers);
+    form.automation_allowed.checked = program.automation_allowed;
+    form.notes.value = program.notes;
+  }
+  renderExclusions(program ? program.excluded_types : []);
+  validateScopeSoon();
+  dialog.showModal();
+}
+
+form.addEventListener("submit", async (event) => {
+  event.preventDefault();
+  const errorBox = $("#form-error");
+  let body;
+  try {
+    body = {
+      name: form.name.value,
+      url: form.url.value,
+      in_scope: form.in_scope.value,
+      out_of_scope: form.out_of_scope.value,
+      rate_limit: Number(form.rate_limit.value),
+      headers: textToHeaders(form.headers.value),
+      automation_allowed: form.automation_allowed.checked,
+      notes: form.notes.value,
+      excluded_types: [...form.querySelectorAll("input[data-type]:checked")]
+        .map((box) => box.dataset.type),
+    };
+  } catch (error) {
+    showErrors(errorBox, error.message);
+    return;
+  }
+  try {
+    const saved = state.editingId
+      ? await api("PUT", `/api/programs/${state.editingId}`, body)
+      : await api("POST", "/api/programs", body);
+    state.selectedId = saved.id;
+    dialog.close();
+    await load();
+  } catch (error) {
+    const detail = error.detail;
+    if (Array.isArray(detail)) {
+      showErrors(errorBox, "Please fix:", detail.map((d) =>
+        `${d.loc[d.loc.length - 1]}: ${d.msg.replace(/^Value error, /, "")}`));
+    } else if (detail && detail.message) {
+      showErrors(errorBox, detail.message, describeScopeErrors(detail.scope_errors || []));
+    } else {
+      showErrors(errorBox, typeof detail === "string" ? detail : "Could not save the program.");
+    }
+  }
+});
+
+form.in_scope.addEventListener("input", validateScopeSoon);
+form.out_of_scope.addEventListener("input", validateScopeSoon);
+$("#cancel").addEventListener("click", () => dialog.close());
+$("#add").addEventListener("click", () => openForm(null));
+
+// ---------- settings ----------
+
+const settingsDialog = $("#settings-dialog");
+const settingsForm = $("#settings-form");
+
+async function showTokenState() {
+  const s = await api("GET", "/api/settings");
+  $("#token-state").textContent = s.github_token_set
+    ? "A token is saved."
+    : s.github_token_from_env ? "Using GITHUB_TOKEN from the environment." : "No token saved.";
+}
+
+$("#settings-btn").addEventListener("click", async () => {
+  settingsForm.reset();
+  $("#settings-error").textContent = "";
+  await showTokenState();
+  settingsDialog.showModal();
+});
+$("#settings-close").addEventListener("click", () => settingsDialog.close());
+$("#token-clear").addEventListener("click", async () => {
+  await api("DELETE", "/api/settings/github-token");
+  await showTokenState();
+});
+settingsForm.addEventListener("submit", async (event) => {
+  event.preventDefault();
+  try {
+    await api("PUT", "/api/settings/github-token", { token: settingsForm.token.value.trim() });
+    settingsForm.reset();
+    await showTokenState();
+  } catch (e) {
+    $("#settings-error").textContent = "That does not look like a GitHub token.";
+  }
+});
+
+(async () => {
+  state.catalog = await api("GET", "/api/catalog");
+  await load();
+})();

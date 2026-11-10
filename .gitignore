@@ -1,0 +1,16 @@
+.venv/
+data/
+__pycache__/
+*.pyc
+
+# never publish local secrets or databases
+.env
+.env.*
+*.db
+*.sqlite
+*.sqlite3
+*.pem
+*.key
+
+# local editor / assistant settings
+.claude/

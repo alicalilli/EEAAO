@@ -1,0 +1,4 @@
+User-agent: *
+Disallow: /private/
+Disallow: /internal-api/
+Sitemap: http://127.0.0.1:8799/sitemap.xml

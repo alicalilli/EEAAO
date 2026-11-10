@@ -1,0 +1,1 @@
+{"version":3,"file":"app.js","sources":["webpack:///src/orders.ts","webpack:///src/admin/secretPanel.ts"],"sourcesContent":["export const API = \"/api/v2/orders\";","// internal admin panel"],"mappings":"AAAA"}
