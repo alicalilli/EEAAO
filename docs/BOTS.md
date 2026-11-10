@@ -80,6 +80,41 @@ skips logout/delete-style links.
   **Excluded** and hidden unless you tick "Show excluded".
 - Secrets are stored and shown **masked**.
 
+### Keeping the list short and current
+
+- **One idea, one card.** Results are grouped where the cause is shared:
+  one card for every host that still accepts TLS 1.0/1.1; one card per version
+  string however many sites show it; one lead for the same form on many pages;
+  one lead per parameter name per site.
+- **Infrastructure is not the application.** Cookies set by CDNs, WAFs, bot
+  managers and load balancers (Akamai `ak_bmsc`/`bm_sv`, F5 `TS…`, Cloudflare,
+  Imperva, AWS/Azure balancers, DataDome, PerimeterX…) have random values but
+  carry no login, so they are never flagged; Inventory → Cookies says who set
+  them. A dangling CNAME to a provider that verifies domain ownership
+  (CloudFront, Akamai, Cloudflare, Google hosted, Microsoft 365, Salesforce
+  Marketing Cloud) is reported as an info-level *stale record*, not a takeover.
+- **Static files are skipped by the Leads bots.** `?q=75` on an image is
+  quality, not a query. An image-resizer endpoint with a `url` parameter is the
+  exception and gets its own lead.
+- **No longer seen.** When a bot completes a full pass and does not find one of
+  its earlier cards again, that card is retired: marked "no longer seen" and
+  hidden unless you tick the toggle. It returns by itself if the issue comes
+  back. Cards you reviewed or dismissed are never touched, a pass that could
+  not look properly (missing Recon data, a source that did not answer) retires
+  nothing, and Recon's own cards are exempt because what Recon sees varies with
+  limits and sources.
+- When a card is seen again it is refreshed with the bot's current wording.
+
+### Watching a run
+
+Pressing **Run** reacts in the card you clicked: the button shows "Starting…",
+then the card shows which bot is running (with its position, e.g. 5 of 8), a
+tick per finished bot and a live log, and other Run buttons are disabled.
+When it ends the card keeps a summary (new findings, leads, inventory items,
+cards no longer seen) with shortcuts to those tabs. This appears even for
+departments that finish in under a second. The Bots tab shows a small spinner
+while a run is going, whichever tab you are on.
+
 ## Recon department (built)
 
 | Bot | Talks to | Produces |
@@ -156,8 +191,8 @@ SSLv2/SSLv3 are not checked (modern OpenSSL cannot speak them).
 | Bot | Flags | Severity |
 |---|---|---|
 | Certificate | expired / not yet valid (expiring within 14 days: info); name mismatch; self-signed; untrusted for another reason (often a missing intermediate: check in a browser); MD5/SHA-1 signature or RSA < 2048 / small EC key | low (mismatch on an IP: info; untrusted: info) |
-| Protocol | TLS 1.0 / 1.1 accepted; the normal handshake picked a weak cipher (RC4, DES/3DES, NULL, export, anonymous, MD5) or one without forward secrecy (info) | low / info |
-| HTTPS | `http://` answers with content instead of redirecting to HTTPS (info if the HTTPS site sends HSTS), or a host only on HTTP; HTTPS pages loading scripts/frames/styles, images, or posting forms over `http://` (canonical/alternate links are ignored) | low / info |
+| Protocol | TLS 1.0 / 1.1 accepted (one card listing every endpoint); the normal handshake picked a weak cipher (RC4, DES/3DES, NULL, export, anonymous, MD5) or one without forward secrecy (info) | low / info |
+| HTTPS | `http://` answers with a page (status 2xx) instead of redirecting to HTTPS; a redirect the bot could not follow is not reported (info if the HTTPS site sends HSTS), or a host only on HTTP; HTTPS pages loading scripts/frames/styles, images, or posting forms over `http://` (canonical/alternate links are ignored) | low / info |
 
 Each endpoint also appears under **Inventory → TLS endpoints** (protocol, cipher,
 trust result, certificate subject, issuer, expiry, old versions accepted).
@@ -193,8 +228,9 @@ The bots never claim or register anything. DKIM is **not** checked: selector
 names can only be found by guessing, which v1 does not do. The `_dmarc` lookup is
 allowed because it belongs to an in-scope domain (`DnsClient` checks the
 domain, and only accepts `_underscore.` names under it). Mail domains are scope
-entries that name a domain itself plus in-scope hosts with MX records, so
-a scope of only `*.example.com` gives no mail domain.
+entries that are a registrable domain themselves (`example.com`, not
+`www.example.com`) plus in-scope hosts with MX records, so a scope of only
+subdomains gives no mail domain unless one of them receives mail.
 
 ## Leads department (built)
 
@@ -236,6 +272,7 @@ tests/
   test_tls.py       TLS with a fake connector and generated certificates
   test_more_departments.py  Content/JS, DNS and takeover, Leads
   test_thirdparty.py RDAP and platform-API checks; asserts linked sites are never contacted
+  test_retire.py    cards no longer seen are retired, return, and survive incomplete passes
   fixtures/site/    tiny local website for manual end-to-end runs
   fixtures/serve.py serves it on 127.0.0.1: HTTP on 8799 (cookies, cookie-setting
                     redirect) and HTTPS on 8798 (self-signed, wrong name, TLS 1.0 on)

@@ -16,6 +16,7 @@ import re
 from .. import db
 from .base import Bot, BotContext
 from .stored import responses
+from .thirdparty import registrable
 
 DEPT = "dns"
 
@@ -48,6 +49,25 @@ SERVICES = [(n, re.compile(c, re.I), re.compile(b, re.I) if b else None, nx)
             for n, c, b, nx in SERVICES]
 
 
+# Services where a dangling CNAME cannot be claimed just by registering the
+# name: the provider checks domain ownership, or the name is not customer-chosen.
+NOT_CLAIMABLE = [
+    ("Amazon CloudFront", re.compile(r"\.cloudfront\.net$", re.I),
+     "CloudFront distribution names are random and assigned by AWS, and AWS verifies "
+     "ownership (a valid certificate for the name) before attaching a custom domain."),
+    ("Akamai", re.compile(r"\.(?:akamaiedge|akamai|edgekey|edgesuite|akamaized|akamaihd)\.net$", re.I),
+     "Akamai hostnames are provisioned under contract and cannot be registered by outsiders."),
+    ("Cloudflare", re.compile(r"\.(?:cdn\.cloudflare\.net|cloudflare\.net|cloudflaressl\.com)$", re.I),
+     "Cloudflare requires proof of domain control before serving a custom hostname."),
+    ("Google (ghs / hosted)", re.compile(r"^ghs\.google(?:hosted)?\.com$", re.I),
+     "Google requires domain verification before mapping a custom domain."),
+    ("Microsoft 365", re.compile(r"\.(?:outlook\.com|office\.com|lync\.com|protection\.outlook\.com)$", re.I),
+     "These are Microsoft service endpoints, not customer-registrable names."),
+    ("Salesforce Marketing Cloud", re.compile(r"\.sfmc-marketing\.com$|\.exacttarget\.com$", re.I),
+     "The target is provisioned by Salesforce for one customer account."),
+]
+
+
 def _under(name: str, roots: list[str]) -> bool:
     return any(name == r or name.endswith("." + r) for r in roots)
 
@@ -61,13 +81,14 @@ class TakeoverBot(Bot):
         if not hosts:
             ctx.log("No in-scope host has a CNAME record. Run the Subdomain and DNS bots "
                     "of the Recon department first.")
+            ctx.partial = True  # input missing: keep earlier cards
             return
         roots = ctx.guard.seed_domains() + ctx.guard.seed_hosts()
         bodies: dict[str, list] = {}
         for page in responses(ctx):
             host = page.url.split("/")[2].split(":")[0].lower()
             bodies.setdefault(host, []).append(page)
-        flagged = 0
+        flagged = stale = 0
         for asset in hosts:
             host, data = asset["value"], asset["data"]
             chain = data["cname"]
@@ -87,6 +108,21 @@ class TakeoverBot(Bot):
             elif service and dangling and service[2]:
                 severity, why = "medium", "the CNAME target no longer resolves"
             elif dangling and external:
+                guarded = next(((n, why_not) for n, pattern, why_not in NOT_CLAIMABLE
+                                if any(pattern.search(c) for c in chain)), None)
+                if guarded:
+                    stale += 1
+                    ctx.finding(
+                        "subdomain_takeover", key=f"{host}|{chain[-1]}", severity="info",
+                        title=f"Stale DNS record: {host} → {guarded[0]} (not claimable by itself)",
+                        target=host,
+                        detail=f"{host} has a CNAME to {chain[-1]}, which no longer resolves. "
+                               f"{guarded[1]} So this is most likely a leftover record, not a "
+                               "takeover. It is still worth a line in your notes: leftover "
+                               "records point at decommissioned systems.",
+                        evidence={"cname_chain": " → ".join([host] + chain), "resolves": False,
+                                  "service": guarded[0]})
+                    continue
                 severity, why = "low", "the CNAME points outside the program's domains and no longer resolves"
             else:
                 continue
@@ -106,7 +142,8 @@ class TakeoverBot(Bot):
                           "fingerprint": matched[1] if matched else None,
                           "seen_in": matched[0].url if matched else None,
                           "status": matched[0].status if matched else None})
-        ctx.log(f"{len(hosts)} hosts with CNAMEs checked; {flagged} possible takeovers")
+        ctx.log(f"{len(hosts)} hosts with CNAMEs checked; {flagged} possible takeovers"
+                + (f", {stale} stale records on services that cannot be claimed" if stale else ""))
 
 
 # =====================================================================
@@ -150,16 +187,20 @@ class EmailSecurityBot(Bot):
     id, department = "email_security", DEPT
 
     async def run(self, ctx: BotContext) -> None:
+        # A mail domain is a registrable domain itself (example.com), or any host
+        # that receives mail (has MX records). A plain subdomain such as
+        # www.example.com is not one: mail "from" it is governed by the parent
+        # domain's DMARC policy, so missing records there mean nothing.
         domains = set()
         for name in ctx.guard.seed_domains() + ctx.guard.seed_hosts():
-            if not re.fullmatch(r"[\d.]+|[0-9a-f:]+", name) and ctx.in_scope_host(name):
+            if registrable(name) == name and ctx.in_scope_host(name):
                 domains.add(name)
         stored = {a["value"]: a["data"] for a in db.get_assets(ctx.program_id, "dns")}
         domains.update(h for h, d in stored.items()
                        if d.get("records", {}).get("MX") and ctx.in_scope_host(h))
         if not domains:
-            ctx.log("No in-scope mail domain: the scope names no domain itself (only "
-                    "*.subdomains or IPs), and no in-scope host has MX records.")
+            ctx.log("No in-scope mail domain: the scope lists no registrable domain itself "
+                    "(only subdomains or IPs), and no in-scope host has MX records.")
             return
         ctx.log("DKIM is not checked: its selector names cannot be discovered without guessing.")
         flagged = 0

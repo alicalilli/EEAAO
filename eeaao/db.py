@@ -108,7 +108,7 @@ CREATE TABLE IF NOT EXISTS findings (
     detail     TEXT NOT NULL DEFAULT '',
     evidence   TEXT NOT NULL DEFAULT '{}',
     dedup_key  TEXT NOT NULL,
-    status     TEXT NOT NULL DEFAULT 'new', -- new | reviewed | dismissed
+    status     TEXT NOT NULL DEFAULT 'new', -- new | reviewed | dismissed | stale
     hits       INTEGER NOT NULL DEFAULT 1,
     first_seen TEXT NOT NULL,
     last_seen  TEXT NOT NULL,
@@ -397,10 +397,25 @@ def upsert_finding(program_id: int, item: dict) -> bool:
              item["detail"][:5000], json.dumps(item["evidence"]), key, stamp, stamp))
         if cursor.rowcount:
             return True
-        conn.execute("UPDATE findings SET hits = hits + 1, last_seen = ?, evidence = ? "
+        # Seen again: refresh the card with the bot's current wording, and bring
+        # it back if it had been retired as "no longer seen".
+        conn.execute("UPDATE findings SET hits = hits + 1, last_seen = ?, evidence = ?, "
+                     "severity = ?, title = ?, target = ?, detail = ?, "
+                     "status = CASE WHEN status = 'stale' THEN 'new' ELSE status END "
                      "WHERE program_id = ? AND dedup_key = ?",
-                     (stamp, json.dumps(item["evidence"]), program_id, key))
+                     (stamp, json.dumps(item["evidence"]), item["severity"],
+                      item["title"][:300], item["target"][:2000], item["detail"][:5000],
+                      program_id, key))
         return False
+
+
+def retire_unseen(program_id: int, bot: str, since: str) -> int:
+    """Mark a bot's untouched 'new' cards as no longer seen ('stale'). Cards
+    you reviewed or dismissed are yours and are left alone."""
+    with connect() as conn:
+        return conn.execute(
+            "UPDATE findings SET status = 'stale' WHERE program_id = ? AND bot = ? "
+            "AND status = 'new' AND last_seen < ?", (program_id, bot, since)).rowcount
 
 
 def list_findings(program_id: int, kind: str) -> list[dict]:

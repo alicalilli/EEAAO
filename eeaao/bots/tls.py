@@ -123,6 +123,7 @@ class CertificateBot(Bot):
         endpoints = https_endpoints(ctx)
         if not endpoints:
             ctx.log("No live HTTPS sites in the inventory. Run the Recon department first.")
+            ctx.partial = True  # input missing: keep earlier cards
             return
         now = datetime.now(timezone.utc)
         problems = 0
@@ -133,6 +134,7 @@ class CertificateBot(Bot):
                 reason = verify.error or verify.verify_error or "no certificate"
                 ctx.asset("tls", netloc, {"error": reason})
                 ctx.log(f"{netloc}: no handshake ({reason})", "warn")
+                ctx.partial = True  # could not look: do not retire this host's cards
                 continue
             info = cert_info(shake.cert_der)
             host = netloc.rsplit(":", 1)[0]
@@ -217,12 +219,14 @@ class ProtocolBot(Bot):
         endpoints = https_endpoints(ctx)
         if not endpoints:
             ctx.log("No live HTTPS sites in the inventory. Run the Recon department first.")
+            ctx.partial = True  # input missing: keep earlier cards
             return
         probe = bool(ctx.options.get("tls_legacy_probe", True))
         if not probe:
             ctx.log("Old-version checks are turned off for this run; only the normal "
                     "handshake is judged.")
         flagged = 0
+        old_hosts: list[tuple[str, str, list[str], str]] = []
         for netloc, url in endpoints.items():
             shake = best(await first_look(ctx, netloc, url))
             if shake is None:
@@ -237,19 +241,9 @@ class ProtocolBot(Bot):
                         accepted[legacy.version or version] = legacy.cipher
             ctx.asset("tls", netloc, {"negotiated": f"{shake.version} {shake.cipher}",
                                       "old_versions_accepted": sorted(accepted) or None})
-            for version, cipher in accepted.items():
-                flagged += 1
-                ctx.finding(
-                    "tls_outdated", key=f"{netloc}|{version}",
-                    severity="low", title=f"{netloc} accepts {version}", target=url,
-                    detail=f"{version} is deprecated (RFC 8996) and has known weaknesses. "
-                           "Programs often rate this low or exclude it; mention it mainly "
-                           "for compliance-sensitive targets.",
-                    evidence={"endpoint": netloc, "version": version, "cipher": cipher,
-                              "normal_handshake": f"{shake.version} {shake.cipher}",
-                              "how_seen": "a standard handshake that offered only this version"
-                              if version != shake.version else "the server chose it for a "
-                              "modern client"})
+            if accepted:
+                old_hosts.append((netloc, url, sorted(accepted),
+                                  f"{shake.version} {shake.cipher}"))
             cipher = shake.cipher or ""
             if WEAK_CIPHER.search(cipher):
                 flagged += 1
@@ -265,6 +259,24 @@ class ProtocolBot(Bot):
                             detail=f"{cipher} uses RSA key exchange: anyone who later obtains "
                                    "the server key can decrypt recorded traffic.",
                             evidence={"endpoint": netloc, "negotiated": f"{shake.version} {cipher}"})
+        if old_hosts:
+            # One card for the whole program: it is one (usually excluded) issue,
+            # however many hosts share the configuration.
+            flagged += 1
+            count = len(old_hosts)
+            ctx.finding(
+                "tls_outdated", key="old-tls-versions", severity="low",
+                title=f"{count} HTTPS endpoint{'s' if count != 1 else ''} still accept"
+                      f"{'s' if count == 1 else ''} TLS 1.0 or 1.1",
+                target=old_hosts[0][1],
+                detail="TLS 1.0 and 1.1 are deprecated (RFC 8996) and have known weaknesses. "
+                       "Programs often rate this low or exclude it; mention it mainly for "
+                       "compliance-sensitive targets.",
+                evidence={"endpoints": [f"{netloc}: {', '.join(versions)} (normally {normal})"
+                                        for netloc, _, versions, normal in old_hosts[:60]],
+                          "total": count,
+                          "how_seen": "a standard handshake that offered only that version, "
+                                      "or the server chose it for a modern client"})
         ctx.flush()
         ctx.log(f"Checked {len(endpoints)} HTTPS endpoints; {flagged} protocol/cipher results")
 
@@ -313,6 +325,7 @@ class HttpsBot(Bot):
         sites = db.get_assets(ctx.program_id, "site")
         if not sites:
             ctx.log("No live sites in the inventory. Run the Recon department first.")
+            ctx.partial = True  # input missing: keep earlier cards
             return
         https_hosts = {k.rsplit(":", 1)[0] for k in https_endpoints(ctx)}
         flagged = 0
@@ -322,7 +335,10 @@ class HttpsBot(Bot):
                 continue
             final = data.get("final_url") or url
             upgraded = final.startswith("https://") or (data.get("blocked_redirect") or "").startswith("https://")
-            if upgraded or not data.get("status") or data["status"] >= 400:
+            # Only a page actually served over HTTP counts. A 3xx we could not
+            # follow (loop, out-of-scope target, redirect limit) is still a
+            # redirect, not content, so it is not reported.
+            if upgraded or not 200 <= (data.get("status") or 0) < 300:
                 continue
             host = urlsplit(url).hostname
             flagged += 1

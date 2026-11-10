@@ -73,6 +73,7 @@ def start(program: dict, department: str, bot_ids: list[str] | None, options: di
 async def _run(shared: RunShared, department: str, chosen: list[str], bots: dict) -> None:
     run_id = shared.run_id
     status = "done"
+    started_at = db.get_run(run_id)["started_at"]
     db.add_event(run_id, "", f"Run started: {len(chosen)} bots, "
                              f"{shared.program['rate_limit']} requests/second")
     try:
@@ -83,9 +84,18 @@ async def _run(shared: RunShared, department: str, chosen: list[str], bots: dict
                 await bots[bot_id].run(ctx)
                 ctx.flush()
                 s = ctx.stats
+                retired = 0
+                if department != "recon" and not ctx.partial:
+                    # A full pass that did not re-find a card means it is gone.
+                    # Recon is exempt: what it sees varies with limits and sources.
+                    retired = db.retire_unseen(shared.program["id"], bot_id, started_at)
+                    s["retired"] = retired
                 db.add_event(run_id, bot_id, f"Finished: {s['assets_new']} new inventory items, "
                                              f"{s['findings_new']} new findings, "
-                                             f"{s['leads_new']} new leads")
+                                             f"{s['leads_new']} new leads"
+                                             + (f"; {retired} earlier result"
+                                                f"{'s' if retired != 1 else ''} no longer seen"
+                                                if retired else ""))
             except asyncio.CancelledError:
                 ctx.flush()
                 raise

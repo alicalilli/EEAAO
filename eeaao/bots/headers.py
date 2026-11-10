@@ -222,22 +222,27 @@ class VersionDisclosureBot(Bot):
     async def run(self, ctx: BotContext) -> None:
         if no_pages_message(ctx):
             return
-        seen: dict[tuple[str, str, str], list[Page]] = {}
+        # One card per version string, however many sites show it: the same
+        # server image behind ten hostnames is one observation, not ten.
+        seen: dict[tuple[str, str], list[Page]] = {}
         for page in pages(ctx):
             for name in VERSION_HEADERS:
                 for value in page.header_all(name):
                     value = value.strip()[:200]
                     if HAS_VERSION.search(value):
-                        seen.setdefault((page.origin, name, value), []).append(page)
-        for (site, name, value), items in seen.items():
+                        seen.setdefault((name, value), []).append(page)
+        for (name, value), items in seen.items():
+            sites = list(dict.fromkeys(p.origin for p in items))
+            where = sites[0] if len(sites) == 1 else f"{len(sites)} sites"
             ctx.finding(
-                "version_disclosure", key=f"{site}|{name}|{value}", severity="info",
-                title=f"{name.title()} reveals '{value}' on {site}", target=site,
+                "version_disclosure", key=f"{name}|{value}", severity="info",
+                title=f"{name.title()} reveals '{value}' on {where}", target=sites[0],
                 detail="The exact software version helps match known CVEs. On its own this "
-                       "is informational; the Outdated library bot (Content department) "
-                       "will check versions against known vulnerabilities.",
-                evidence={"header": f"{name}: {value}", "responses": len(items),
-                          "examples": _examples(items)})
+                       "is informational, and server software versions are not checked "
+                       "against CVE data by the bots: look the version up yourself if the "
+                       "host matters.",
+                evidence={"header": f"{name}: {value}", "sites": sites[:40],
+                          "responses": len(items), "examples": _examples(items)})
         ctx.log(f"{len(seen)} version strings disclosed")
 
 

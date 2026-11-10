@@ -91,6 +91,8 @@ class TlsRunTests(DbTestCase):
             ("http://good.example.com/", {"status": 200, "final_url": "http://good.example.com/"}),
             ("http://plain.example.com/", {"status": 200, "final_url": "http://plain.example.com/"}),
             ("http://old.example.com/", {"status": 301, "final_url": "https://old.example.com/"}),
+            # a redirect the bot could not follow is still a redirect, not content
+            ("http://loop.example.com/", {"status": 301, "final_url": "http://loop.example.com/"}),
         ]
         db.upsert_assets(pid, [("site", url, data) for url, data in sites])
         store(pid, "https://good.example.com/", [
@@ -151,6 +153,9 @@ class TlsRunTests(DbTestCase):
         self.assertEqual(mixed["forms"], ["http://good.example.com/subscribe"])
         self.assertIn("forward secrecy", by[("tls_weak_cipher", "https://old.example.com/")]["title"])
 
+        old = by[("tls_outdated", "https://old.example.com/")]
+        self.assertEqual(old["evidence"]["total"], 1)
+        self.assertIn("old.example.com:443: TLSv1", old["evidence"]["endpoints"][0])
         tls = {a["value"]: a["data"] for a in db.get_assets(pid, "tls")}
         self.assertEqual(tls["old.example.com:443"]["old_versions_accepted"], ["TLSv1"])
         self.assertTrue(tls["good.example.com:443"]["verified"])

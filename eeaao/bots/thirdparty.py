@@ -77,6 +77,7 @@ class BrokenLinkBot(Bot):
         links = external_links(ctx)
         if not links:
             ctx.log("No links to other sites in the inventory. Run the Crawler bot first.")
+            ctx.partial = True  # input missing: keep earlier cards
             return
         ours = _program_domains(ctx)
         domains: dict[str, list[dict]] = {}
@@ -90,6 +91,7 @@ class BrokenLinkBot(Bot):
         registries = await self._bootstrap(ctx)
         if registries is None:
             ctx.log("Could not load IANA's list of registry servers; nothing checked.", "error")
+            ctx.partial = True  # input missing: keep earlier cards
             return
         limit = int(ctx.options.get("thirdparty_max_domains", 200))
         checked = flagged = unknown = 0
@@ -108,6 +110,8 @@ class BrokenLinkBot(Bot):
             state, detail = self._state(response)
             ctx.asset("linkdomain", domain, {"registry": urlsplit(base).hostname, "state": state,
                                              "links": len(uses)})
+            if state.startswith("unknown"):
+                ctx.partial = True  # no usable answer: keep earlier cards
             if state not in ("not registered", "being deleted", "expired"):
                 continue
             flagged += 1
@@ -238,6 +242,7 @@ class SocialHandleBot(Bot):
                     ctx.log("GitHub API rate limit reached; remaining GitHub handles not checked.",
                             "warn")
                     status = "not checked: rate limit"
+                    ctx.partial = True
                 elif response is not None and response.status_code in (200, 404):
                     status = "exists" if response.status_code == 200 else "not found"
                 else:

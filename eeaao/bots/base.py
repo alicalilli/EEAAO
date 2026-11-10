@@ -47,6 +47,9 @@ class BotContext:
         self.stats = shared.counts.setdefault(bot, {"assets_new": 0, "findings_new": 0,
                                                     "leads_new": 0})
         self._pending: list[tuple[str, str, dict]] = []
+        # Set by a bot when it could not do a full pass (missing input, a source
+        # that did not answer). The runner then leaves its earlier cards alone.
+        self.partial = False
 
     # --- network (all scope-checked, rate-limited, logged) ---
     async def fetch(self, url: str, **kwargs):

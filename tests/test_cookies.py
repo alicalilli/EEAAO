@@ -40,6 +40,11 @@ class CookieRunTests(DbTestCase):
             ("Set-Cookie", "_ga=GA1.2.123.456; Domain=.example.com; Path=/"),
             ("Set-Cookie", "csrftoken=xyz123456789; Path=/; Secure; SameSite=Lax"),
             ("Set-Cookie", "theme=dark; Path=/"),
+            # bot-manager and load-balancer cookies: random values, but not sessions
+            ("Set-Cookie", f"ak_bmsc={RANDOM}; Domain=.example.com; Path=/"),
+            ("Set-Cookie", f"bm_sv={RANDOM}; Domain=.example.com; Path=/; Secure"),
+            ("Set-Cookie", f"TS0117a65d={RANDOM}; Path=/"),
+            ("Set-Cookie", f"AWSALB={RANDOM}; Path=/"),
             ("Set-Cookie", "auth_token=; Max-Age=0; Path=/"),
             ("Set-Cookie", f"zq={RANDOM}; Path=/; Secure; HttpOnly; SameSite=Strict"),
         ], "<p>app</p>")
@@ -90,6 +95,11 @@ class CookieRunTests(DbTestCase):
         inventory = {a["value"]: a["data"] for a in db.get_assets(pid, "cookie")}
         self.assertIn("app.example.com _ga", inventory)
         self.assertFalse(inventory["app.example.com _ga"]["session_like"])
+        self.assertFalse(inventory["app.example.com ak_bmsc"]["session_like"])
+        self.assertEqual(inventory["app.example.com ak_bmsc"]["set_by_infrastructure"],
+                         "Akamai Bot Manager")
+        self.assertEqual(inventory["app.example.com TS0117a65d"]["set_by_infrastructure"],
+                         "F5 BIG-IP")
         self.assertTrue(inventory[f"app.example.com zq"]["session_like"])
         self.assertNotIn("app.example.com auth_token", inventory)  # deletion, not a cookie
         self.assertFalse(any(k.startswith("admin.") for k in inventory))

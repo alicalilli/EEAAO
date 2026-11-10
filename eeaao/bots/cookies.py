@@ -31,6 +31,25 @@ NOT_SESSION = re.compile(
     r"OptanonConsent|OptanonAlertBoxClosed|CookieConsent|cookielawinfo|euconsent|"
     r"lang|locale|language|theme|timezone|currency|country|__cf_bm|_cfuvid|cf_clearance)",
     re.I)
+# Cookies set by CDNs, WAFs, bot managers and load balancers. Their values look
+# random, but they do not carry a user's login, so their flags are not findings.
+INFRASTRUCTURE = [
+    ("Akamai Bot Manager", re.compile(r"^(?:ak_bmsc|bm_sv|bm_sz|bm_mi|bm_so|bm_s|bm_ss|_abck|akavpau_|akaalb_|AKA_A2$|RT$)", re.I)),
+    ("F5 BIG-IP", re.compile(r"^(?:TS[0-9a-f]{6,}|BIGipServer|F5_|MRHSession$|LastMRH_Session$)", re.I)),
+    ("Cloudflare", re.compile(r"^(?:__cf_bm|_cfuvid|cf_clearance|__cflb|__cfruid|cf_ob_info|cf_use_ob|CF_AppSession)", re.I)),
+    ("Imperva / Incapsula", re.compile(r"^(?:incap_ses_|visid_incap_|nlbi_|reese84$|___utmvc)", re.I)),
+    ("AWS load balancer / WAF", re.compile(r"^(?:AWSALB|AWSALBCORS|AWSALBTG|AWSELB|aws-waf-token)", re.I)),
+    ("Azure load balancer", re.compile(r"^(?:ARRAffinity|ARRAffinitySameSite|ApplicationGatewayAffinity)", re.I)),
+    ("DataDome", re.compile(r"^datadome$", re.I)),
+    ("PerimeterX / HUMAN", re.compile(r"^_px(?:hd|vid|3|2|de)?$|^pxcts$", re.I)),
+    ("Google Cloud load balancer", re.compile(r"^GCLB$", re.I)),
+    ("Sucuri", re.compile(r"^sucuri_cloudproxy", re.I)),
+    ("HAProxy / generic balancer", re.compile(r"^(?:SERVERID|SRVNAME|ROUTEID|lb_?cookie|sticky)", re.I)),
+]
+
+
+def infrastructure(name: str) -> str | None:
+    return next((label for label, pattern in INFRASTRUCTURE if pattern.match(name)), None)
 
 
 @dataclass
@@ -69,7 +88,7 @@ class Cookie:
         return bool(CSRF_NAME.search(self.name))
 
     def session_reason(self) -> str | None:
-        if NOT_SESSION.search(self.name):
+        if NOT_SESSION.search(self.name) or infrastructure(self.name):
             return None
         if SESSION_NAME.search(self.name):
             return "name looks like a session/auth cookie"
@@ -172,6 +191,7 @@ class CookieFlagsBot(Bot):
             reason = first.session_reason()
             ctx.asset("cookie", f"{host} {name}", {
                 "set_cookie": first.masked, "session_like": bool(reason),
+                "set_by_infrastructure": infrastructure(name),
                 "set_by": {c.page.requested: 1 for c in instances[:5]}})
             if not reason:
                 continue

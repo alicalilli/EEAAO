@@ -22,6 +22,7 @@ var cfg = {{aws: "{AWS}", maps: "{GOOGLE}"}};
 fetch("/api/v2/orders"); fetch("https://api.example.com/v1/users");
 var ci = "https://jenkins.corp.example.com/job/x"; var db = "http://10.0.3.7:8080/x";
 var notIp = "1.2.3"; var img = "/static/logo.png";
+function t(e){{return e.local?e.locale:e.internal}}  var svc = "https://db01.internal/status";
 //# sourceMappingURL=app.js.map"""
 OTHER_JS = "console.log(1)\n//# sourceMappingURL=https://admin.example.com/x.js.map"
 SOURCEMAP = {"version": 3, "sources": ["webpack:///src/api.ts", "webpack:///src/admin.ts"],
@@ -102,8 +103,9 @@ class ContentTests(DbTestCase):
         self.assertIn("info", secrets.values())  # the Google key
         self.assertNotIn(AWS, json.dumps(findings))
 
-        self.assertEqual([f["evidence"]["host"] for f in by_type["internal_host_disclosure"]],
-                         ["jenkins.corp.example.com"])
+        # "e.local" / "e.internal" in code are properties, not hosts
+        self.assertEqual(sorted(f["evidence"]["host"] for f in by_type["internal_host_disclosure"]),
+                         ["db01.internal", "jenkins.corp.example.com"])
         self.assertEqual([f["evidence"]["ip"] for f in by_type["internal_ip_disclosure"]],
                          ["10.0.3.7"])
         smap = by_type["sourcemap_exposed"][0]
@@ -156,6 +158,8 @@ class DnsDepartmentTests(DbTestCase):
             ("host", "blog.example.com", {"resolves": True, "cname": ["examplecorp.github.io"]}),
             ("host", "app.example.com", {"resolves": False, "cname": ["exampleapp.azurewebsites.net"]}),
             ("host", "old.example.com", {"resolves": False, "cname": ["x.unknownsvc.net"]}),
+            ("host", "cdn.example.com", {"resolves": False, "cname": ["d3nogw076chdmr.cloudfront.net"]}),
+            ("dns", "www.example.com", {"status": "NOERROR", "records": {"A": ["93.184.216.34"]}}),
             ("host", "ok.example.com", {"resolves": True, "cname": ["examplecorp.github.io"]}),
             ("host", "internal.example.com", {"resolves": False, "cname": ["lb.example.com"]}),
             ("host", "admin.example.com", {"resolves": False, "cname": ["gone.herokuapp.com"]}),
@@ -180,7 +184,10 @@ class DnsDepartmentTests(DbTestCase):
         findings = db.list_findings(pid, "finding")
         takeover = {f["target"]: f["severity"] for f in findings if f["type"] == "subdomain_takeover"}
         self.assertEqual(takeover, {"blog.example.com": "medium", "app.example.com": "medium",
-                                    "old.example.com": "low"})
+                                    "old.example.com": "low", "cdn.example.com": "info"})
+        stale = next(f for f in findings if f["target"] == "cdn.example.com")
+        self.assertIn("not claimable", stale["title"])
+        self.assertIn("CloudFront", stale["title"])
         ns = next(f for f in findings if f["type"] == "dangling_ns")
         self.assertEqual(ns["evidence"]["known_provider"], ["ns-1.awsdns-01.org"])
         mail = {(f["type"], f["target"], f["severity"]) for f in findings
@@ -194,34 +201,59 @@ class DnsDepartmentTests(DbTestCase):
 class LeadsTests(DbTestCase):
     def test_run(self):
         pid = db.create_program(PROGRAM)
+        www = "https://www.example.com"
+        search_pages = [f"{www}/", f"{www}/shop", f"{www}/shop/tees"]
         db.upsert_assets(pid, [
-            ("param", "https://www.example.com/login ? next",
-             {"sources": {"crawler": 1}, "example": "https://www.example.com/login?next=https%3A%2F%2Fx.test%2F"}),
-            ("param", "https://www.example.com/account ? return_to", {"sources": {"wayback": 1}}),
-            ("param", "https://www.example.com/list ? page", {"sources": {"crawler": 1}}),
-            ("param", "https://www.example.com/search ? q", {"sources": {"crawler": 1}}),
-            ("param", "https://www.example.com/feedback ? message", {"sources": {"form": 1}}),
+            ("param", f"{www}/login ? next",
+             {"sources": {"crawler": 1}, "example": f"{www}/login?next=https%3A%2F%2Fx.test%2F"}),
+            ("param", f"{www}/account ? return_to", {"sources": {"wayback": 1}}),
+            ("param", f"{www}/old/account ? return_to", {"sources": {"wayback": 1}}),
+            ("param", f"{www}/list ? page", {"sources": {"crawler": 1}}),
+            ("param", f"{www}/search ? q", {"sources": {"crawler": 1}}),
+            ("param", f"{www}/feedback ? message", {"sources": {"wayback": 1}}),
+            ("param", f"{www}/contact ? message", {"sources": {"wayback": 1}}),
+            # static files and image resizers: parameters pick a file or a size
+            ("param", f"{www}/js/jquery.base.js ? path",
+             {"sources": {"wayback": 1}, "example": f"{www}/js/jquery.base.js?path=/2009/2.4"}),
+            ("param", f"{www}/img/hero.jpg ? q",
+             {"sources": {"crawler": 1}, "example": f"{www}/img/hero.jpg?w=3840&q=75"}),
+            ("param", f"{www}/_next/image ? q",
+             {"sources": {"crawler": 1}, "example": f"{www}/_next/image?url=%2Fa.jpg&w=64&q=75"}),
+            ("param", f"{www}/_next/image ? url",
+             {"sources": {"crawler": 1}, "example": f"{www}/_next/image?url=%2Fa.jpg&w=64&q=75"}),
+            # an ordinary name whose value is a full URL
+            ("param", f"{www}/share ? img",
+             {"sources": {"crawler": 1}, "example": f"{www}/share?img=https://cdn.x.test/a.png"}),
             ("param", "https://admin.example.com/a ? url", {"sources": {"crawler": 1}}),
-            ("form", "GET https://www.example.com/search", {"inputs": {"q": "text"},
-                                                             "found_on": "https://www.example.com/"}),
-            ("form", "POST https://www.example.com/login", {"inputs": {"user": "input",
-                                                                         "password": "password"}}),
-        ])
-        store(pid, "https://www.example.com/search?q=shoes123", [("Content-Type", "text/html")],
+            ("form", f"POST {www}/login", {"inputs": {"user": "input", "password": "password"}}),
+        ] + [("form", f"GET {page}", {"inputs": {"search": "text"}, "found_on": page})
+             for page in search_pages]
+          + [("param", f"{page} ? search", {"sources": {"form": 1}}) for page in search_pages])
+        store(pid, f"{www}/search?q=shoes123", [("Content-Type", "text/html")],
               '<form><input name="q" value="shoes123"></form><p>No results</p>')
         run_dept(pid, "leads")
         leads = db.list_findings(pid, "lead")
         redirect = {(l["evidence"]["parameter"], l["severity"]) for l in leads
                     if l["type"] == "lead_redirect_param"}
-        self.assertEqual(redirect, {("next", "low"), ("return_to", "info")})
-        xss = [l for l in leads if l["type"] == "lead_xss_param"]
-        reflected = [l for l in xss if "reflected" in l["title"]]
-        self.assertEqual(len(reflected), 1)
-        self.assertEqual(reflected[0]["evidence"]["context"], "inside an HTML tag (attribute)")
-        titles = {l["title"] for l in xss}
-        self.assertIn("Parameter 'message' is the kind often echoed back", titles)
-        self.assertFalse(any("'q' is the kind" in t for t in titles))  # already reflected
-        self.assertEqual(sum(1 for t in titles if "form with free-text" in t), 2)
+        self.assertEqual(redirect, {("next", "low"), ("return_to", "info"), ("url", "low"),
+                                    ("img", "low")})
+        grouped = next(l for l in leads if l["evidence"].get("parameter") == "return_to")
+        self.assertEqual(grouped["evidence"]["seen_on"], "2 endpoints")
+        resizer = next(l for l in leads if l["evidence"].get("parameter") == "url")
+        self.assertIn("Image resizer", resizer["title"])
+
+        xss = {l["title"]: l for l in leads if l["type"] == "lead_xss_param"}
+        self.assertEqual(set(xss), {
+            "Parameter 'q' is reflected inside an HTML tag",
+            "GET form with free-text field search on www.example.com",
+            "POST form with free-text field user on www.example.com",
+            "Parameter 'message' on www.example.com is the kind often echoed back",
+        })
+        # the same search box on three pages is one lead
+        form = xss["GET form with free-text field search on www.example.com"]
+        self.assertEqual(form["evidence"]["seen_on"], "3 pages")
+        self.assertEqual(xss["Parameter 'message' on www.example.com is the kind often echoed back"]
+                         ["evidence"]["seen_on"], "2 endpoints")
         self.assertFalse(any("admin.example.com" in l["target"] for l in leads))
 
     def test_reflection_context(self):

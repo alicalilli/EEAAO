@@ -82,6 +82,9 @@ class SecretsBot(Bot):
 _PATH = re.compile(r"""["'`](/(?=[A-Za-z0-9_-]*[A-Za-z])[A-Za-z0-9_\-./{}:%]{1,200}(?:\?[^"'`\s<>]{0,200})?)["'`]""")
 _FULL_URL = re.compile(r"""https?://[A-Za-z0-9.-]+(?::\d{2,5})?(?:/[^\s"'`<>()\\]{0,300})?""")
 _IP_CONTEXT = re.compile(r"""(?:["'/@=]|https?://)((?:\d{1,3}\.){3}\d{1,3})(?::\d{2,5})?(?=[/"':])""")
+_INTERNAL_NAME = re.compile(
+    r"""(?:["'`@]|//)((?:[a-z0-9](?:[a-z0-9-]*[a-z0-9])?\.)+(?:local|internal|corp|lan|intranet))"""
+    r"""(?=["'`/:?#])""", re.I)
 _ASSET_EXT = re.compile(r"\.(?:png|jpe?g|gif|svg|webp|ico|css|woff2?|ttf|eot|map|mp4|webm)(?:\?|$)", re.I)
 
 
@@ -95,6 +98,7 @@ class EndpointsBot(Bot):
         files = scripts(ctx)
         if not files:
             ctx.log("No JavaScript files stored. Run the Crawler bot first.")
+            ctx.partial = True  # input missing: keep earlier cards
             return
         endpoints = hosts_flagged = ips_flagged = 0
         for page in files:
@@ -116,18 +120,22 @@ class EndpointsBot(Bot):
                     ctx.asset("endpoint", url, {"from": {page.url: 1}})
             endpoints += len(seen)
 
-            hosts = set()
+            hosts: dict[str, int] = {}
+            lowered = text.lower()
             for root in roots:
-                hosts.update(hostnames_under(text, root))
-            hosts.update(h.lower() for h in re.findall(
-                r"\b(?:[a-z0-9-]+\.)+(?:local|internal|corp|lan|intranet)(?![\w.-])", text, re.I))
-            for host in sorted(hosts):
+                for found in hostnames_under(text, root):
+                    hosts.setdefault(found, lowered.find(found))
+            # Names on internal-only suffixes count only inside a string or URL.
+            # In minified code "e.local" is far more often a property of a
+            # variable than a hostname.
+            for match in _INTERNAL_NAME.finditer(text):
+                hosts.setdefault(match.group(1).lower(), match.start(1))
+            for host, at in sorted(hosts.items()):
                 if ctx.guard.check_host_automated(host).reason == "Explicitly out of scope.":
                     continue  # the program asked us to leave it alone entirely
                 if ctx.in_scope_host(host):
                     ctx.asset("host", host, {"sources": {"javascript": 1}})
                 if looks_internal(host):
-                    at = text.lower().find(host)
                     if ctx.finding(
                             "internal_host_disclosure", key=f"{host}", severity="info",
                             title=f"Internal-looking host {host} named in JavaScript",
@@ -186,6 +194,8 @@ class SourceMapBot(Bot):
                 skipped += 1
                 continue
             fetched = await ctx.fetch(url, follow=False)
+            if fetched is None:
+                ctx.partial = True  # network trouble, not an answer
             if fetched is None or fetched.status != 200:
                 ctx.asset("sourcemap", url, {"status": fetched.status if fetched else None,
                                              "referenced_by": js})
@@ -402,6 +412,7 @@ class LibrariesBot(Bot):
                                         log_url=f"https://api.osv.dev/v1/query (npm {name} {version})")
             if response is None or response.status_code != 200:
                 ctx.log(f"OSV gave no answer for {name} {version}", "warn")
+                ctx.partial = True
                 cache[(name, version)] = None
             else:
                 cache[(name, version)] = response.json().get("vulns", [])

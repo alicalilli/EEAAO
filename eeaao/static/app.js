@@ -49,7 +49,7 @@ function when(iso) {
 
 const state = {
   programs: [], selectedId: null, editingId: null, catalog: [], tab: "overview",
-  poll: null, showExcluded: false, showDismissed: false,
+  poll: null, showExcluded: false, showDismissed: false, showStale: false,
   inventory: { kind: "", q: "", offset: 0 }, log: { offset: 0 },
 };
 
@@ -111,7 +111,7 @@ function renderDetail() {
   const body = h("div", { class: "tab-body" });
   const tabs = h("div", { class: "tabs", role: "tablist" }, TABS.map(([id, label]) =>
     h("button", {
-      role: "tab", "aria-selected": state.tab === id ? "true" : "false",
+      role: "tab", "data-tab": id, "aria-selected": state.tab === id ? "true" : "false",
       onclick: () => { state.tab = id; renderDetail(); },
     }, label)));
 
@@ -139,6 +139,11 @@ function renderDetail() {
     leads: (p, b) => renderFindings(p, b, "lead"), inventory: renderInventory, log: renderLog,
   }[state.tab];
   render(program, body);
+  // Mark the Bots tab while a run is going, whichever tab is open.
+  if (state.tab !== "bots") {
+    api("GET", `/api/programs/${program.id}/runs`)
+      .then((runs) => setTabBusy(runs.active != null)).catch(() => {});
+  }
 }
 
 function renderOverview(program, body) {
@@ -216,17 +221,20 @@ async function renderBots(program, body) {
     return;
   }
   const busy = runs.active != null;
+  const cards = {};
 
   for (const dept of state.catalog) {
     const boxes = [];
     const optionInputs = {};
+    const marks = {};
     const list = h("ul", { class: "bots" }, dept.bots.map((bot) => {
       const box = h("input", { type: "checkbox", checked: bot.built, disabled: !bot.built,
                                "data-bot": bot.id });
       if (bot.built) boxes.push(box);
+      marks[bot.id] = h("span", { class: "bot-mark", "aria-live": "polite" });
       return h("li", {},
         h("label", { class: "check" }, box,
-          h("span", {}, h("strong", {}, bot.name), " ",
+          h("span", {}, h("strong", {}, bot.name), " ", marks[bot.id], " ",
             !bot.built && h("span", { class: "badge" }, "Planned"),
             h("span", { class: "hint" }, bot.does))));
     }));
@@ -270,76 +278,202 @@ async function renderBots(program, body) {
           h("span", { class: "hint" },
             "Two extra standard handshakes per HTTPS endpoint, like an old browser connecting."))));
     }
-    const start = async () => {
+    const runButton = h("button", { class: "primary", disabled: busy || !program.automation_allowed },
+      `Run ${dept.name}`);
+    const progress = h("div", { class: "dept-run" });
+    const section = h("section", { class: "dept" },
+      h("div", { class: "dept-head" },
+        h("div", {}, h("h4", {}, dept.name), h("p", { class: "hint" }, dept.summary)),
+        dept.runnable ? runButton : h("span", { class: "badge" }, "Coming next")),
+      list, extra, error, progress);
+    cards[dept.id] = { dept, section, runButton, progress, marks };
+    runButton.addEventListener("click", async () => {
       const bots = boxes.filter((b) => b.checked).map((b) => b.dataset.bot);
       const options = {};
       for (const [key, input] of Object.entries(optionInputs)) {
         options[key] = input.type === "checkbox" ? input.checked : Number(input.value);
       }
+      error.textContent = "";
+      // React at once, before the server answers.
+      setRunButtons(cards, true);
+      runButton.replaceChildren(h("span", { class: "spinner" }), " Starting…");
       try {
-        await api("POST", `/api/programs/${program.id}/runs`,
-                  { department: dept.id, bots, options });
-        renderDetail();
+        const run = await api("POST", `/api/programs/${program.id}/runs`,
+                              { department: dept.id, bots, options });
+        followRun(program, run.id, cards, runsBox);
       } catch (e) {
+        setRunButtons(cards, false, program);
         error.textContent = typeof e.detail === "string" ? e.detail : "Could not start the run.";
       }
-    };
-    departments.append(h("section", { class: "dept" },
-      h("div", { class: "dept-head" },
-        h("div", {}, h("h4", {}, dept.name), h("p", { class: "hint" }, dept.summary)),
-        dept.runnable
-          ? h("button", { class: "primary", onclick: start,
-                          disabled: busy || !program.automation_allowed }, `Run ${dept.name}`)
-          : h("span", { class: "badge" }, "Coming next")),
-      list, extra, error));
+    });
+    departments.append(section);
   }
 
-  runsBox.replaceChildren(runs.runs.length ? h("ul", { class: "run-list" }, runs.runs.map((run) =>
-    h("li", {},
-      h("span", { class: `badge ${run.status === "done" ? "ok" : run.status === "running" ? "warn" : "no"}` },
-        run.status),
-      h("span", {}, `${run.department} · ${run.bots.length} bots`),
-      h("span", { class: "muted" }, when(run.started_at)),
-      h("button", { onclick: () => showRun(program, run.id, live, false) }, "Show log"))))
+  const drawRuns = (list) => runsBox.replaceChildren(list.length
+    ? h("ul", { class: "run-list" }, list.map((run) =>
+      h("li", {},
+        h("span", { class: `badge ${RUN_TONE[run.status] || "no"}` }, run.status),
+        h("span", {}, `${run.department} · ${run.bots.length} bots`),
+        h("span", { class: "muted" }, when(run.started_at)),
+        h("button", { onclick: () => { showRun(program, run.id, live); live.scrollIntoView({ block: "nearest" }); } },
+          "Show log"))))
     : h("p", { class: "muted" }, "No runs yet."));
+  runsBox.redraw = async () => {
+    try {
+      drawRuns((await api("GET", `/api/programs/${program.id}/runs`)).runs);
+    } catch (e) { /* the list simply stays as it was */ }
+  };
+  drawRuns(runs.runs);
 
-  if (busy) showRun(program, runs.active, live, true);
+  // A run that was already going when this tab opened: pick it up.
+  if (busy) followRun(program, runs.active, cards, runsBox);
 }
 
-async function showRun(program, runId, box, follow) {
+const RUN_TONE = { done: "ok", running: "warn" };
+
+function setRunButtons(cards, disabled, program) {
+  for (const card of Object.values(cards)) {
+    card.runButton.disabled = disabled || (program && !program.automation_allowed);
+    if (!disabled) card.runButton.textContent = `Run ${card.dept.name}`;
+  }
+}
+
+function setTabBusy(busy) {
+  const tab = [...document.querySelectorAll(".tabs button")].find((b) => b.dataset.tab === "bots");
+  if (tab) tab.classList.toggle("busy", busy);
+}
+
+// Shows a run inside the card of its department: spinner, current bot, a tick
+// per finished bot, live log, and a summary that stays when it ends.
+async function followRun(program, runId, cards, runsBox) {
   stopPolling();
+  setRunButtons(cards, true);
+  setTabBusy(true);
+  let card = null, after = 0, current = "", lastLine = "";
+  const started = Date.now();
+  const spinner = h("span", { class: "spinner" });
+  const headline = h("strong", {});
+  const sub = h("span", { class: "muted" });
   const events = h("ol", { class: "events mono" });
-  const status = h("span", { class: "badge warn" }, "…");
   const stop = h("button", { class: "danger", onclick: async () => {
-    await api("POST", `/api/runs/${runId}/stop`); } }, "Stop run");
-  box.replaceChildren(h("div", { class: "run-panel" },
-    h("div", { class: "row" }, h("strong", {}, `Run #${runId}`), status, stop), events));
-  let after = 0;
+    stop.disabled = true;
+    stop.textContent = "Stopping…";
+    await api("POST", `/api/runs/${runId}/stop`);
+  } }, "Stop");
+  const head = h("div", { class: "row run-head", role: "status" }, spinner, headline, sub, stop);
+  const result = h("div", { class: "run-result" });
+  const log = h("details", { class: "run-log", open: true }, h("summary", {}, "Live log"), events);
+
   const tick = async () => {
     let run;
     try {
       run = await api("GET", `/api/runs/${runId}?after=${after}`);
     } catch (e) {
+      state.poll = setTimeout(tick, 3000);  // the app may be restarting: keep trying
       return;
+    }
+    if (!card) {
+      card = cards[run.department];
+      if (!card) return;
+      for (const other of Object.values(cards)) other.section.classList.remove("running");
+      card.section.classList.add("running");
+      card.runButton.replaceChildren(h("span", { class: "spinner" }), " Running…");
+      for (const [bot, mark] of Object.entries(card.marks)) {
+        mark.className = "bot-mark";
+        mark.textContent = run.bots.includes(bot) ? "waiting" : "";
+        if (run.bots.includes(bot)) mark.classList.add("wait");
+      }
+      card.progress.replaceChildren(h("div", { class: "run-panel" }, head, result, log));
+      card.progress.scrollIntoView({ block: "nearest", behavior: "smooth" });
     }
     for (const event of run.events) {
       after = event.id;
       events.append(h("li", { class: `ev ${event.level}` },
         h("span", { class: "muted" }, new Date(event.at).toLocaleTimeString()), " ",
         event.bot && h("strong", {}, event.bot), " ", event.message));
+      const mark = card.marks[event.bot];
+      if (mark && event.message === "Started") {
+        current = event.bot;
+        lastLine = "";
+        mark.className = "bot-mark run";
+        mark.replaceChildren(h("span", { class: "spinner small" }), " running");
+      } else if (mark && event.message.startsWith("Finished")) {
+        mark.className = "bot-mark done";
+        mark.textContent = "✓ done";
+      } else if (mark && /^(Crashed|Stopped)/.test(event.message)) {
+        mark.className = "bot-mark fail";
+        mark.textContent = "✗ failed";
+      } else if (event.bot) {
+        lastLine = event.message;
+      }
     }
     events.scrollTop = events.scrollHeight;
-    status.textContent = run.status;
-    status.className = `badge ${run.status === "done" ? "ok" : run.status === "running" ? "warn" : "no"}`;
-    stop.hidden = run.status !== "running";
-    if (run.status === "running" && state.tab === "bots" && currentProgram()?.id === program.id) {
-      state.poll = setTimeout(tick, 1500);
-    } else if (follow && run.status !== "running") {
-      follow = false;
-      if (state.tab === "bots") setTimeout(renderDetail, 800);
+    const seconds = Math.round((Date.now() - started) / 1000);
+    const botName = (card.dept.bots.find((b) => b.id === current) || {}).name || "Starting";
+    const position = run.bots.indexOf(current) + 1;
+
+    if (run.status === "running") {
+      headline.textContent = `${card.dept.name} is running: ${botName}`
+        + (position ? ` (${position} of ${run.bots.length})` : "");
+      sub.textContent = `${seconds} s` + (lastLine ? ` · ${lastLine}` : "");
+      state.poll = setTimeout(tick, 1000);
+      return;
     }
+    // Finished: leave a clear result where the user clicked.
+    const totals = Object.values(run.summary || {}).reduce((sum, s) => ({
+      findings: sum.findings + (s.findings_new || 0), leads: sum.leads + (s.leads_new || 0),
+      assets: sum.assets + (s.assets_new || 0), retired: sum.retired + (s.retired || 0) }),
+      { findings: 0, leads: 0, assets: 0, retired: 0 });
+    spinner.remove();
+    stop.remove();
+    const ok = run.status === "done";
+    headline.textContent = ok ? `${card.dept.name} finished`
+      : `${card.dept.name} ${run.status === "stopped" ? "was stopped" : "ended with errors"}`;
+    sub.textContent = `${run.bots.length} bots`;
+    head.prepend(h("span", { class: `badge ${ok ? "ok" : "no"}` }, ok ? "Done" : run.status));
+    const go = (tab) => { state.tab = tab; renderDetail(); };
+    result.replaceChildren(
+      h("span", {}, `${totals.findings} new finding${totals.findings === 1 ? "" : "s"}, `
+        + `${totals.leads} new lead${totals.leads === 1 ? "" : "s"}, `
+        + `${totals.assets} new inventory item${totals.assets === 1 ? "" : "s"}`
+        + (totals.retired ? `, ${totals.retired} earlier result${totals.retired === 1 ? "" : "s"} no longer seen` : "")),
+      h("span", { class: "buttons" },
+        h("button", { onclick: () => go("findings") }, "View findings"),
+        h("button", { onclick: () => go("leads") }, "View leads"),
+        h("button", { onclick: () => go("inventory") }, "View inventory")));
+    log.open = !ok;
+    for (const mark of Object.values(card.marks)) {
+      if (mark.classList.contains("wait") || mark.classList.contains("run")) {
+        mark.className = "bot-mark";
+        mark.textContent = ok ? "" : "not run";
+      }
+    }
+    card.section.classList.remove("running");
+    card.section.classList.add("finished");
+    setRunButtons(cards, false, program);
+    setTabBusy(false);
+    if (runsBox.redraw) runsBox.redraw();
   };
   tick();
+}
+
+// A past run's log, shown at the top of the tab.
+async function showRun(program, runId, box) {
+  let run;
+  try {
+    run = await api("GET", `/api/runs/${runId}`);
+  } catch (e) {
+    return;
+  }
+  box.replaceChildren(h("div", { class: "run-panel" },
+    h("div", { class: "row" }, h("strong", {}, `Run #${runId}: ${run.department}`),
+      h("span", { class: `badge ${RUN_TONE[run.status] || "no"}` }, run.status),
+      h("span", { class: "muted" }, when(run.started_at)),
+      h("button", { onclick: () => box.replaceChildren() }, "Close")),
+    h("ol", { class: "events mono" }, run.events.map((event) =>
+      h("li", { class: `ev ${event.level}` },
+        h("span", { class: "muted" }, new Date(event.at).toLocaleTimeString()), " ",
+        event.bot && h("strong", {}, event.bot), " ", event.message)))));
 }
 
 // ---------- findings and leads ----------
@@ -370,15 +504,22 @@ async function renderFindings(program, body, kind) {
   }
   const excludedCount = items.filter((i) => i.excluded).length;
   const dismissedCount = items.filter((i) => i.status === "dismissed").length;
+  const staleCount = items.filter((i) => i.status === "stale").length;
   const visible = items.filter((i) => (state.showExcluded || !i.excluded) &&
-                                      (state.showDismissed || i.status !== "dismissed"));
+                                      (state.showDismissed || i.status !== "dismissed") &&
+                                      (state.showStale || i.status !== "stale"));
   const toggles = h("div", { class: "row" },
     h("label", { class: "check inline" }, h("input", { type: "checkbox", checked: state.showExcluded,
       onchange: (e) => { state.showExcluded = e.target.checked; renderDetail(); } }),
       h("span", {}, `Show excluded (${excludedCount})`)),
     h("label", { class: "check inline" }, h("input", { type: "checkbox", checked: state.showDismissed,
       onchange: (e) => { state.showDismissed = e.target.checked; renderDetail(); } }),
-      h("span", {}, `Show dismissed (${dismissedCount})`)));
+      h("span", {}, `Show dismissed (${dismissedCount})`)),
+    h("label", { class: "check inline", title: "Results a later run of the same bot did not find again" },
+      h("input", { type: "checkbox", checked: state.showStale,
+        onchange: (e) => { state.showStale = e.target.checked; renderDetail(); } }),
+      h("span", {}, `Show no longer seen (${staleCount})`)),
+    h("span", { class: "muted" }, `${visible.length} shown`));
 
   const intro = kind === "lead"
     ? "Leads are candidates for your own manual work. Nothing here was tested."
@@ -389,12 +530,13 @@ async function renderFindings(program, body, kind) {
   };
   fill(body, h("p", { class: "muted" }, intro), toggles,
     visible.length ? h("div", { class: "cards" }, visible.map((item) =>
-      h("article", { class: `finding ${item.excluded || item.status === "dismissed" ? "dim" : ""}` },
+      h("article", { class: `finding ${item.excluded || item.status === "dismissed" || item.status === "stale" ? "dim" : ""}` },
         h("div", { class: "row" },
           h("span", { class: `badge ${SEV_TONE[item.severity] || ""}` }, item.severity),
           h("span", { class: "badge" }, item.type_label),
           item.excluded && h("span", { class: "badge no" }, "Excluded by program"),
-          item.status !== "new" && h("span", { class: "badge ok" }, item.status)),
+          item.status === "stale" && h("span", { class: "badge" }, "no longer seen"),
+          item.status !== "new" && item.status !== "stale" && h("span", { class: "badge ok" }, item.status)),
         h("h4", {}, item.title),
         h("p", { class: "mono target" }, item.target),
         item.detail && h("p", {}, item.detail),
@@ -470,7 +612,8 @@ function summarize(kind, data) {
     parts.push("fields: " + Object.keys(data.inputs || {}).join(", "));
     if (data.found_on) parts.push("on " + data.found_on);
   } else {
-    if (data.set_cookie) parts.push(data.set_cookie + (data.session_like ? " · session-like" : ""));
+    if (data.set_cookie) parts.push(data.set_cookie + (data.session_like ? " · session-like" : "")
+      + (data.set_by_infrastructure ? ` · set by ${data.set_by_infrastructure}, not the application` : ""));
     for (const key of ["status", "kind", "title", "repo", "path", "provider", "entries", "paths", "bytes"]) {
       if (data[key] != null && data[key] !== "") parts.push(`${key}: ${data[key]}`);
     }

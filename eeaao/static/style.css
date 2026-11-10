@@ -189,3 +189,40 @@ table.log tr.err td { color: var(--no); }
 .exclusions legend { font-size: 12px; color: var(--muted); padding: 0 4px; }
 .inline-hint { display: inline !important; }
 #detail { min-width: 0; }
+
+/* ---------- run feedback ---------- */
+.spinner {
+  display: inline-block; width: 14px; height: 14px; border-radius: 50%; vertical-align: -2px;
+  border: 2px solid currentColor; border-right-color: transparent;
+  animation: spin 0.8s linear infinite;
+}
+.spinner.small { width: 10px; height: 10px; border-width: 2px; vertical-align: -1px; }
+@keyframes spin { to { transform: rotate(360deg); } }
+@media (prefers-reduced-motion: reduce) { .spinner { animation-duration: 2.4s; } }
+.dept.running { border-color: var(--accent); box-shadow: 0 0 0 1px var(--accent); }
+.dept.finished { border-color: var(--ok); }
+.dept-run:empty { display: none; }
+.dept-run { margin-top: 12px; }
+.run-head { color: var(--text); }
+.run-head .spinner { color: var(--accent); }
+.run-head .muted { flex-basis: 100%; order: 9; font-size: 13px; overflow-wrap: anywhere; }
+.run-head strong { flex: 1; min-width: 0; }
+.dept-head button { white-space: nowrap; flex-shrink: 0; }
+.run-result { display: flex; gap: 10px 16px; flex-wrap: wrap; align-items: center;
+              justify-content: space-between; margin-top: 8px; }
+.run-result:empty { display: none; }
+.run-result .buttons { display: flex; gap: 6px; flex-wrap: wrap; }
+.run-result button { padding: 3px 10px; font-size: 13px; }
+.run-log { margin-top: 8px; }
+.run-log summary { cursor: pointer; color: var(--muted); font-size: 13px; }
+.bot-mark { font-size: 12px; font-weight: 600; white-space: nowrap; }
+.bot-mark:empty { display: none; }
+.bot-mark.wait { color: var(--muted); font-weight: 400; }
+.bot-mark.run { color: var(--accent); }
+.bot-mark.done { color: var(--ok); }
+.bot-mark.fail { color: var(--no); }
+.tabs button.busy::after {
+  content: ""; display: inline-block; width: 8px; height: 8px; margin-left: 6px;
+  border-radius: 50%; border: 2px solid var(--accent); border-right-color: transparent;
+  animation: spin 0.8s linear infinite; vertical-align: 0;
+}

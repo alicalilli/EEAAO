@@ -114,6 +114,7 @@ def by_origin(items: list[Page]) -> dict[str, list[Page]]:
 def no_pages_message(ctx: BotContext) -> bool:
     """Log and return True when there is nothing to analyse."""
     if not pages(ctx):
+        ctx.partial = True  # input missing: keep earlier cards
         ctx.log("No stored responses yet. Run the Recon department first "
                 "(Live host, Public files and Crawler bots store what they fetch).")
         return True
