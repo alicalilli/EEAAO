@@ -55,8 +55,16 @@ NOT_CLAIMABLE = [
     ("Amazon CloudFront", re.compile(r"\.cloudfront\.net$", re.I),
      "CloudFront distribution names are random and assigned by AWS, and AWS verifies "
      "ownership (a valid certificate for the name) before attaching a custom domain."),
-    ("Akamai", re.compile(r"\.(?:akamaiedge|akamai|edgekey|edgesuite|akamaized|akamaihd)\.net$", re.I),
-     "Akamai hostnames are provisioned under contract and cannot be registered by outsiders."),
+    ("Akamai", re.compile(r"\.(?:akamaiedge|akamai|edgekey|edgesuite|akamaized|akamaihd|akadns)\.net$"
+                          r"|\.akamaitechnologies\.com$", re.I),
+     "Akamai hostnames (including its akadns.net DNS service) are provisioned under contract "
+     "and cannot be registered by outsiders."),
+    ("Limelight / Edgio", re.compile(r"\.(?:llnwd|llnwi|llnw|edgecastcdn|edgio|systemcdn)\.net$", re.I),
+     "Limelight/Edgio names are assigned by the provider per customer account, not chosen or "
+     "registered by the public."),
+    ("Fastly (shared)", re.compile(r"\.(?:global|map)\.fastly\.net$|\.fastlylb\.net$", re.I),
+     "Fastly's shared hostnames are not claimable; a takeover there needs Fastly's own "
+     "'unknown domain' page, which the Takeover bot checks separately."),
     ("Cloudflare", re.compile(r"\.(?:cdn\.cloudflare\.net|cloudflare\.net|cloudflaressl\.com)$", re.I),
      "Cloudflare requires proof of domain control before serving a custom hostname."),
     ("Google (ghs / hosted)", re.compile(r"^ghs\.google(?:hosted)?\.com$", re.I),

@@ -13,7 +13,7 @@ from urllib.parse import urlsplit
 
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.trustedhost import TrustedHostMiddleware
-from fastapi.responses import FileResponse
+from fastapi.responses import HTMLResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field, field_validator
 
@@ -282,7 +282,22 @@ def delete_github_token():
 
 @app.get("/")
 def index():
-    return FileResponse(STATIC / "index.html")
+    """The page, with each script and stylesheet address carrying the file's
+    current version, so a browser can never keep running old code."""
+    html = (STATIC / "index.html").read_text(encoding="utf-8")
+    for name in ("app.js", "style.css"):
+        version = int((STATIC / name).stat().st_mtime)
+        html = html.replace(f"/static/{name}?v=dev", f"/static/{name}?v={version}")
+    return HTMLResponse(html, headers={"Cache-Control": "no-cache"})
+
+
+@app.middleware("http")
+async def revalidate_static(request, call_next):
+    """Browsers must ask before reusing a cached copy of the app's own files."""
+    response = await call_next(request)
+    if request.url.path.startswith("/static/"):
+        response.headers["Cache-Control"] = "no-cache"
+    return response
 
 
 app.mount("/static", StaticFiles(directory=STATIC), name="static")

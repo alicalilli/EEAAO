@@ -159,6 +159,9 @@ class DnsDepartmentTests(DbTestCase):
             ("host", "app.example.com", {"resolves": False, "cname": ["exampleapp.azurewebsites.net"]}),
             ("host", "old.example.com", {"resolves": False, "cname": ["x.unknownsvc.net"]}),
             ("host", "cdn.example.com", {"resolves": False, "cname": ["d3nogw076chdmr.cloudfront.net"]}),
+            ("host", "dl.example.com", {"resolves": False, "cname": ["rsgames.s.llnwi.net"]}),
+            ("host", "remote.example.com", {"resolves": False,
+                                            "cname": ["remote.take2games.com.akadns.net"]}),
             ("dns", "www.example.com", {"status": "NOERROR", "records": {"A": ["93.184.216.34"]}}),
             ("host", "ok.example.com", {"resolves": True, "cname": ["examplecorp.github.io"]}),
             ("host", "internal.example.com", {"resolves": False, "cname": ["lb.example.com"]}),
@@ -184,7 +187,8 @@ class DnsDepartmentTests(DbTestCase):
         findings = db.list_findings(pid, "finding")
         takeover = {f["target"]: f["severity"] for f in findings if f["type"] == "subdomain_takeover"}
         self.assertEqual(takeover, {"blog.example.com": "medium", "app.example.com": "medium",
-                                    "old.example.com": "low", "cdn.example.com": "info"})
+                                    "old.example.com": "low", "cdn.example.com": "info",
+                                    "dl.example.com": "info", "remote.example.com": "info"})
         stale = next(f for f in findings if f["target"] == "cdn.example.com")
         self.assertIn("not claimable", stale["title"])
         self.assertIn("CloudFront", stale["title"])

@@ -297,13 +297,16 @@ async function renderBots(program, body) {
       // React at once, before the server answers.
       setRunButtons(cards, true);
       runButton.replaceChildren(h("span", { class: "spinner" }), " Starting…");
+      runbarStarting(program, dept.name);
       try {
         const run = await api("POST", `/api/programs/${program.id}/runs`,
                               { department: dept.id, bots, options });
+        trackRun(program, run.id);
         followRun(program, run.id, cards, runsBox);
       } catch (e) {
         setRunButtons(cards, false, program);
         error.textContent = typeof e.detail === "string" ? e.detail : "Could not start the run.";
+        runbarFailed(`${dept.name} did not start: ${error.textContent}`);
       }
     });
     departments.append(section);
@@ -350,7 +353,6 @@ async function followRun(program, runId, cards, runsBox) {
   setRunButtons(cards, true);
   setTabBusy(true);
   let card = null, after = 0, current = "", lastLine = "";
-  const started = Date.now();
   const spinner = h("span", { class: "spinner" });
   const headline = h("strong", {});
   const sub = h("span", { class: "muted" });
@@ -408,14 +410,14 @@ async function followRun(program, runId, cards, runsBox) {
       }
     }
     events.scrollTop = events.scrollHeight;
-    const seconds = Math.round((Date.now() - started) / 1000);
+    const elapsed = duration(Date.now() - Date.parse(run.started_at));
     const botName = (card.dept.bots.find((b) => b.id === current) || {}).name || "Starting";
     const position = run.bots.indexOf(current) + 1;
 
     if (run.status === "running") {
       headline.textContent = `${card.dept.name} is running: ${botName}`
         + (position ? ` (${position} of ${run.bots.length})` : "");
-      sub.textContent = `${seconds} s` + (lastLine ? ` · ${lastLine}` : "");
+      sub.textContent = elapsed + (lastLine ? ` · ${lastLine}` : "");
       state.poll = setTimeout(tick, 1000);
       return;
     }
@@ -882,7 +884,127 @@ settingsForm.addEventListener("submit", async (event) => {
   }
 });
 
+// ---------- run status bar (top of the window, every tab) ----------
+
+const runbar = { runId: null, timer: null, after: 0, current: "", hideTimer: null };
+
+// The bar's slot is in index.html, but a browser may still show a page saved
+// before the bar existed. Create the slot then, instead of failing.
+function runbarEl() {
+  let bar = $("#runbar");
+  if (!bar) {
+    bar = h("div", { id: "runbar", class: "runbar", role: "status", "aria-live": "polite" });
+    bar.hidden = true;
+    const header = document.querySelector("header.top");
+    if (header) header.after(bar);
+    else document.body.prepend(bar);
+  }
+  return bar;
+}
+
+function duration(ms) {
+  const total = Math.max(0, Math.round(ms / 1000));
+  const h_ = Math.floor(total / 3600), m = Math.floor((total % 3600) / 60), s = total % 60;
+  return h_ ? `${h_}h ${m}m` : m ? `${m}m ${String(s).padStart(2, "0")}s` : `${s}s`;
+}
+
+function deptName(id) {
+  return (state.catalog.find((d) => d.id === id) || {}).name || id;
+}
+
+function goToBots(programId) {
+  state.tab = "bots";
+  if (state.selectedId !== programId) select(programId);
+  else renderDetail();
+}
+
+// Shown the instant Run is pressed, before the server has answered.
+function runbarStarting(program, departmentName) {
+  const bar = runbarEl();
+  clearTimeout(runbar.hideTimer);
+  bar.hidden = false;
+  bar.className = "runbar running";
+  bar.replaceChildren(h("span", { class: "spinner" }),
+    h("strong", {}, `Starting ${departmentName}`), h("span", { class: "muted" }, program.name));
+}
+
+function runbarFailed(message) {
+  const bar = runbarEl();
+  bar.className = "runbar failed";
+  bar.replaceChildren(h("strong", {}, message),
+    h("button", { onclick: () => { bar.hidden = true; } }, "Close"));
+}
+
+function trackRun(program, runId) {
+  if (runbar.runId === runId) return;
+  clearTimeout(runbar.timer);
+  clearTimeout(runbar.hideTimer);
+  Object.assign(runbar, { runId, after: 0, current: "" });
+  const bar = runbarEl();
+  const tick = async () => {
+    if (runbar.runId !== runId) return;
+    let run;
+    try {
+      run = await api("GET", `/api/runs/${runId}?after=${runbar.after}`);
+    } catch (e) {
+      runbar.timer = setTimeout(tick, 3000);  // app restarting: keep trying
+      return;
+    }
+    for (const event of run.events) {
+      runbar.after = event.id;
+      if (event.bot && event.message === "Started") runbar.current = event.bot;
+    }
+    const dept = state.catalog.find((d) => d.id === run.department);
+    const bot = dept && dept.bots.find((b) => b.id === runbar.current);
+    const position = run.bots.indexOf(runbar.current) + 1;
+    const startedAt = Date.parse(run.started_at);
+    const show = h("button", { onclick: () => goToBots(program.id) }, "Show");
+    bar.hidden = false;
+    if (run.status === "running") {
+      bar.className = "runbar running";
+      bar.replaceChildren(
+        h("span", { class: "spinner" }),
+        h("strong", {}, `${deptName(run.department)} is running`),
+        h("span", {}, bot ? `${bot.name} (${position} of ${run.bots.length})` : "starting…"),
+        h("span", { class: "muted" }, `${program.name} · ${duration(Date.now() - startedAt)}`),
+        show);
+      runbar.timer = setTimeout(tick, 1500);
+      return;
+    }
+    const totals = Object.values(run.summary || {}).reduce((sum, s) => ({
+      findings: sum.findings + (s.findings_new || 0), leads: sum.leads + (s.leads_new || 0) }),
+      { findings: 0, leads: 0 });
+    const ok = run.status === "done";
+    const took = duration(Date.parse(run.finished_at || new Date().toISOString()) - startedAt);
+    bar.className = `runbar ${ok ? "done" : "failed"}`;
+    bar.replaceChildren(
+      h("strong", {}, `${deptName(run.department)} ${ok ? "finished" : run.status === "stopped"
+        ? "was stopped" : "ended with errors"}`),
+      h("span", {}, `${totals.findings} new findings, ${totals.leads} new leads`),
+      h("span", { class: "muted" }, `${program.name} · took ${took}`),
+      show,
+      h("button", { onclick: () => { bar.hidden = true; } }, "Close"));
+    if (ok) runbar.hideTimer = setTimeout(() => { bar.hidden = true; }, 20000);
+    setTabBusy(false);
+  };
+  tick();
+}
+
+// Pick up a run that is already going (page reload, run started earlier).
+async function findActiveRuns() {
+  for (const program of state.programs) {
+    try {
+      const runs = await api("GET", `/api/programs/${program.id}/runs`);
+      if (runs.active != null) {
+        trackRun(program, runs.active);
+        return;
+      }
+    } catch (e) { /* ignore: the bar just stays hidden */ }
+  }
+}
+
 (async () => {
   state.catalog = await api("GET", "/api/catalog");
   await load();
+  findActiveRuns();
 })();

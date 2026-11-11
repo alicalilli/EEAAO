@@ -107,7 +107,17 @@ skips logout/delete-style links.
 
 ### Watching a run
 
-Pressing **Run** reacts in the card you clicked: the button shows "Starting…",
+A **status bar at the top of the window**, on every tab, shows the run from the
+instant **Run** is pressed ("Starting …"), then which department and bot are
+running, the bot's position, and the time since the run started; at the end it
+shows the result for 20 seconds (or until closed, if the run failed). It also
+picks up a run that was already going when the page was opened.
+
+The page sends the app's script and stylesheet with their version in the
+address and tells the browser to always check for changes, so an update is
+picked up on the next page load without clearing the browser cache.
+
+Pressing **Run** also reacts in the card you clicked: the button shows "Starting…",
 then the card shows which bot is running (with its position, e.g. 5 of 8), a
 tick per finished bot and a live log, and other Run buttons are disabled.
 When it ends the card keeps a summary (new findings, leads, inventory items,

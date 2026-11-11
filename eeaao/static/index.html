@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Everything Everywhere All at Once</title>
-<link rel="stylesheet" href="/static/style.css">
+<link rel="stylesheet" href="/static/style.css?v=dev">
 </head>
 <body>
 <header class="top">
@@ -17,6 +17,7 @@
     <button id="add" class="primary">Add program</button>
   </div>
 </header>
+<div id="runbar" class="runbar" role="status" aria-live="polite" hidden></div>
 
 <main>
   <section id="list" aria-label="Programs"></section>
@@ -93,6 +94,6 @@
   </form>
 </dialog>
 
-<script src="/static/app.js"></script>
+<script src="/static/app.js?v=dev"></script>
 </body>
 </html>
