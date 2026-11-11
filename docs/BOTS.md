@@ -105,6 +105,15 @@ skips logout/delete-style links.
   limits and sources.
 - When a card is seen again it is refreshed with the bot's current wording.
 
+### Starting over
+
+**Clear results** (next to Edit and Delete on a program) deletes that program's
+findings, leads, inventory and saved responses after showing exactly how many
+of each will go. It keeps the program, its scope and settings, exclusions, run
+history and the request log (your record of what was sent to the target). It
+is refused while a run is in progress. Run Recon again afterwards: the other
+departments work from the responses Recon saves.
+
 ### Watching a run
 
 A **status bar at the top of the window**, on every tab, shows the run from the
@@ -168,8 +177,8 @@ often set the session cookie on a 302. Deleted cookies (empty value, Max-Age=0,
 past Expires) are ignored. Cookie values are always masked.
 
 Only **session-like** cookies are flagged (name such as `sessionid`, `auth`,
-`token`, `PHPSESSID`, or a long random value), never analytics, consent or
-preference cookies. Every cookie still goes into **Inventory → Cookies** with
+`token`, `PHPSESSID`, or a long random value), never analytics, consent,
+preference, anti-CSRF (`csrftoken`, `XSRF-TOKEN`) or infrastructure cookies. Every cookie still goes into **Inventory → Cookies** with
 its attributes.
 
 | Bot | Flags | Severity |
@@ -283,6 +292,7 @@ tests/
   test_more_departments.py  Content/JS, DNS and takeover, Leads
   test_thirdparty.py RDAP and platform-API checks; asserts linked sites are never contacted
   test_retire.py    cards no longer seen are retired, return, and survive incomplete passes
+  test_clear.py     Clear results removes one program's results and keeps its history
   fixtures/site/    tiny local website for manual end-to-end runs
   fixtures/serve.py serves it on 127.0.0.1: HTTP on 8799 (cookies, cookie-setting
                     redirect) and HTTPS on 8798 (self-signed, wrong name, TLS 1.0 on)

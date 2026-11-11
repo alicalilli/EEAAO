@@ -209,6 +209,29 @@ def delete_program(program_id: int) -> bool:
                             (program_id,)).rowcount > 0
 
 
+def result_counts(program_id: int) -> dict[str, int]:
+    with connect() as conn:
+        one = lambda sql: conn.execute(sql, (program_id,)).fetchone()[0]  # noqa: E731
+        return {
+            "findings": one("SELECT COUNT(*) FROM findings WHERE program_id = ? AND kind = 'finding'"),
+            "leads": one("SELECT COUNT(*) FROM findings WHERE program_id = ? AND kind = 'lead'"),
+            "inventory": one("SELECT COUNT(*) FROM assets WHERE program_id = ?"),
+            "responses": one("SELECT COUNT(*) FROM responses WHERE program_id = ?"),
+        }
+
+
+def clear_results(program_id: int) -> dict[str, int]:
+    """Start over on a program: delete its findings, leads, inventory and saved
+    responses (the analysis departments would otherwise rebuild cards from the
+    old responses). Scope, settings, run history and the request log stay: the
+    log is your record of what was sent to the target."""
+    removed = result_counts(program_id)
+    with connect() as conn:
+        for table in ("findings", "assets", "responses"):
+            conn.execute(f"DELETE FROM {table} WHERE program_id = ?", (program_id,))
+    return removed
+
+
 # ---------- runs ----------
 
 def create_run(program_id: int, department: str, bots: list[str], options: dict) -> int:

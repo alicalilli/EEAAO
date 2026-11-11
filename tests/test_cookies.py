@@ -39,6 +39,8 @@ class CookieRunTests(DbTestCase):
             ("Set-Cookie", "sessionid=abcdef1234567890; Path=/"),
             ("Set-Cookie", "_ga=GA1.2.123.456; Domain=.example.com; Path=/"),
             ("Set-Cookie", "csrftoken=xyz123456789; Path=/; Secure; SameSite=Lax"),
+            # an anti-CSRF cookie without flags: not a session cookie, never flagged
+            ("Set-Cookie", "XSRF-TOKEN=k3j4h5g6f7d8a9s0d1f2; Path=/"),
             ("Set-Cookie", "theme=dark; Path=/"),
             # bot-manager and load-balancer cookies: random values, but not sessions
             ("Set-Cookie", f"ak_bmsc={RANDOM}; Domain=.example.com; Path=/"),

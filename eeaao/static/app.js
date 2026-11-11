@@ -120,6 +120,9 @@ function renderDetail() {
       h("h2", {}, program.name),
       h("div", { class: "buttons" },
         h("button", { onclick: () => openForm(program) }, "Edit"),
+        h("button", { onclick: () => clearResults(program),
+                      title: "Delete findings, leads, inventory and saved responses; keep the program" },
+          "Clear results"),
         h("button", { class: "danger", onclick: () => remove(program) }, "Delete"))),
     h("div", { class: "facts" },
       automationBadge(program),
@@ -711,8 +714,58 @@ async function load() {
 
 async function remove(program) {
   if (!confirm(`Delete "${program.name}", its scope and everything the bots collected? This cannot be undone.`)) return;
-  await api("DELETE", `/api/programs/${program.id}`);
+  try {
+    await api("DELETE", `/api/programs/${program.id}`);
+  } catch (e) {
+    alert(typeof e.detail === "string" ? e.detail : "Could not delete the program.");
+    return;
+  }
   await load();
+}
+
+// Start over on a program: remove what the bots found, keep the program itself.
+async function clearResults(program) {
+  let counts;
+  try {
+    counts = await api("GET", `/api/programs/${program.id}/results`);
+  } catch (e) {
+    alert("Could not read the program's results.");
+    return;
+  }
+  const total = counts.findings + counts.leads + counts.inventory + counts.responses;
+  if (!total) {
+    alert(`"${program.name}" has no results to clear.`);
+    return;
+  }
+  const message = `Clear all results of "${program.name}"?\n\n`
+    + `This deletes:\n`
+    + `  • ${counts.findings} findings\n`
+    + `  • ${counts.leads} leads\n`
+    + `  • ${counts.inventory} inventory items\n`
+    + `  • ${counts.responses} saved responses\n\n`
+    + `It keeps the scope, settings, exclusions, run history and request log.\n`
+    + `Run Recon again before the other departments.\n\nThis cannot be undone.`;
+  if (!confirm(message)) return;
+  let result;
+  try {
+    result = await api("DELETE", `/api/programs/${program.id}/results`);
+  } catch (e) {
+    alert(typeof e.detail === "string" ? e.detail : "Could not clear the results.");
+    return;
+  }
+  const bar = runbarEl();
+  clearTimeout(runbar.hideTimer);
+  bar.hidden = false;
+  bar.className = "runbar done";
+  const r = result.removed;
+  bar.replaceChildren(
+    h("strong", {}, `Cleared ${program.name}`),
+    h("span", {}, `${r.findings} findings, ${r.leads} leads, ${r.inventory} inventory items, `
+      + `${r.responses} saved responses removed`),
+    h("button", { onclick: () => { bar.hidden = true; } }, "Close"));
+  runbar.hideTimer = setTimeout(() => { bar.hidden = true; }, 15000);
+  state.inventory = { kind: "", q: "", offset: 0 };
+  renderDetail();
 }
 
 // ---------- add / edit form ----------

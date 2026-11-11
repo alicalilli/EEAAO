@@ -145,7 +145,25 @@ def update_program(program_id: int, body: ProgramIn):
 @app.delete("/api/programs/{program_id}", status_code=204)
 def delete_program(program_id: int):
     _require(program_id)
+    if runner.active_run(program_id):
+        raise HTTPException(409, "A run is in progress for this program. Stop it first.")
     db.delete_program(program_id)
+
+
+@app.get("/api/programs/{program_id}/results")
+def result_counts(program_id: int):
+    _require(program_id)
+    return db.result_counts(program_id)
+
+
+@app.delete("/api/programs/{program_id}/results")
+def clear_results(program_id: int):
+    """Delete findings, leads, inventory and saved responses; keep the program."""
+    _require(program_id)
+    if runner.active_run(program_id):
+        raise HTTPException(409, "A run is in progress for this program. Stop it or wait "
+                                 "for it to finish before clearing its results.")
+    return {"removed": db.clear_results(program_id)}
 
 
 @app.post("/api/scope/validate")

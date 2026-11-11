@@ -90,6 +90,8 @@ class Cookie:
     def session_reason(self) -> str | None:
         if NOT_SESSION.search(self.name) or infrastructure(self.name):
             return None
+        if self.csrf:
+            return None  # an anti-CSRF token is not a login; its flags are not session issues
         if SESSION_NAME.search(self.name):
             return "name looks like a session/auth cookie"
         if _looks_random(self.value):
